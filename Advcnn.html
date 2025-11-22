@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced CNN Glass-Box Visualizer</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Fira+Code:wght@400;600&display=swap" rel="stylesheet">
+    
+    <!-- Lucide Icons (via unpkg for simplicity in single file) -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #09090b; color: #e4e4e7; }
+        .font-mono { font-family: 'Fira Code', monospace; }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #18181b; }
+        ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+        /* Animations */
+        @keyframes float { 0% { transform: translateY(0px); } 50% { transform: translateY(-5px); } 100% { transform: translateY(0px); } }
+        .animate-float { animation: float 3s ease-in-out infinite; }
+        
+        @keyframes pulse-glow { 0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); } 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); } }
+        .active-cell { animation: pulse-glow 1.5s infinite; }
+
+        /* Grid lines for background */
+        .bg-grid-pattern {
+            background-image: linear-gradient(to right, #27272a 1px, transparent 1px),
+                              linear-gradient(to bottom, #27272a 1px, transparent 1px);
+            background-size: 40px 40px;
+        }
+        
+        .glass-panel {
+            background: rgba(24, 24, 27, 0.7);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // --- Constants & Config ---
+        
+        const PRESETS = {
+            "Line |": [
+                [0,1,0,0,1,0], [0,1,0,0,1,0], [0,1,0,0,1,0],
+                [0,1,0,0,1,0], [0,1,0,0,1,0], [0,1,0,0,1,0]
+            ],
+            "Line -": [
+                [0,0,0,0,0,0], [1,1,1,1,1,1], [0,0,0,0,0,0],
+                [0,0,0,0,0,0], [1,1,1,1,1,1], [0,0,0,0,0,0]
+            ],
+            "Corner": [
+                [1,1,1,0,0,0], [1,0,0,0,0,0], [1,0,0,0,0,0],
+                [0,0,0,0,0,0], [0,0,0,0,0,0], [0,0,0,0,0,0]
+            ],
+            "X Shape": [
+                [1,0,0,0,0,1], [0,1,0,0,1,0], [0,0,1,1,0,0],
+                [0,0,1,1,0,0], [0,1,0,0,1,0], [1,0,0,0,0,1]
+            ]
+        };
+
+        // Kernels (Filters)
+        const KERNELS = {
+            "Vertical Edge": [[1, 0, -1], [1, 0, -1], [1, 0, -1]],
+            "Horizontal Edge": [[1, 1, 1], [0, 0, 0], [-1, -1, -1]],
+            "Identity": [[0, 0, 0], [0, 1, 0], [0, 0, 0]]
+        };
+
+        // --- Helper Components ---
+
+        const Icon = ({ name, size = 20, className }) => {
+            // Using Lucide icons injected by script, we render placeholders or SVGs
+            // For standalone React in browser without build step, simple SVG is safer
+            const icons = {
+                play: <polygon points="5 3 19 12 5 21 5 3" />,
+                pause: <g><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></g>,
+                refresh: <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />,
+                step: <path d="M5 4l10 8-10 8V4zM19 5v14" />,
+                edit: <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />,
+                eye: <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z" />
+            };
+            return (
+                <svg 
+                    xmlns="http://www.w3.org/2000/svg" 
+                    width={size} height={size} 
+                    viewBox="0 0 24 24" 
+                    fill="none" 
+                    stroke="currentColor" 
+                    strokeWidth="2" 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    className={className}
+                >
+                    {icons[name] || <circle cx="12" cy="12" r="10" />}
+                </svg>
+            );
+        };
+
+        const MathBox = ({ visible, title, equation, result }) => (
+            <div className={`absolute bottom-4 right-4 z-50 w-72 glass-panel p-4 rounded-xl shadow-2xl transition-all duration-300 transform ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10 pointer-events-none'}`}>
+                <div className="flex items-center gap-2 mb-2 pb-2 border-b border-gray-700">
+                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                    <h4 className="text-xs font-bold text-gray-300 uppercase tracking-wider">{title}</h4>
+                </div>
+                <div className="font-mono text-xs text-gray-400 mb-2 break-all leading-relaxed">
+                    {equation}
+                </div>
+                <div className="flex justify-between items-center bg-black/30 p-2 rounded">
+                    <span className="text-xs text-gray-500">Result</span>
+                    <span className="text-lg font-bold text-green-400">{result}</span>
+                </div>
+            </div>
+        );
+
+        const Grid = ({ data, label, active, highlight, onCellClick, colorTheme = "blue" }) => {
+            const theme = {
+                blue: { bg: 'bg-blue-500', ring: 'ring-blue-400', text: 'text-blue-100' },
+                purple: { bg: 'bg-purple-500', ring: 'ring-purple-400', text: 'text-purple-100' },
+                green: { bg: 'bg-emerald-500', ring: 'ring-emerald-400', text: 'text-emerald-100' }
+            };
+            const t = theme[colorTheme];
+
+            return (
+                <div className={`relative p-4 glass-panel rounded-xl transition-all duration-500 ${active ? `ring-1 ${t.ring} shadow-[0_0_30px_-10px_rgba(59,130,246,0.3)]` : 'opacity-60 grayscale-[0.5]'}`}>
+                    <div className="absolute -top-3 left-4 bg-[#09090b] px-2 text-xs font-bold text-gray-400 uppercase tracking-wider border border-gray-800 rounded">
+                        {label}
+                    </div>
+                    <div 
+                        className="grid gap-1" 
+                        style={{ gridTemplateColumns: `repeat(${data[0].length}, minmax(0, 1fr))` }}
+                        onMouseLeave={() => onCellClick && onCellClick(-1, -1)} // Clear drawing on leave
+                    >
+                        {data.map((row, r) => (
+                            row.map((val, c) => {
+                                const isHighlight = highlight && 
+                                    r >= highlight.r && r < highlight.r + highlight.h &&
+                                    c >= highlight.c && c < highlight.c + highlight.w;
+                                
+                                const intensity = Math.min(Math.abs(val), 1); // Clamp for opacity
+                                const isNegative = val < 0;
+
+                                return (
+                                    <div 
+                                        key={`${r}-${c}`}
+                                        onMouseDown={() => onCellClick && onCellClick(r, c)}
+                                        onMouseEnter={(e) => e.buttons === 1 && onCellClick && onCellClick(r, c)}
+                                        className={`
+                                            w-8 h-8 flex items-center justify-center text-[10px] font-mono rounded-sm cursor-default border border-white/5
+                                            transition-all duration-200
+                                            ${isHighlight ? `z-10 scale-110 ring-2 ring-yellow-400 shadow-lg` : ''}
+                                            ${val !== 0 ? (isNegative ? 'bg-red-500/20 text-red-200' : `${t.bg}/20 ${t.text}`) : 'bg-gray-800/50 text-gray-600'}
+                                        `}
+                                        style={{
+                                            backgroundColor: val !== 0 ? (isNegative ? `rgba(239, 68, 68, ${Math.abs(val)*0.5})` : `rgba(${colorTheme === 'blue'? '59, 130, 246' : colorTheme === 'purple' ? '168, 85, 247' : '16, 185, 129'}, ${Math.max(0.1, Math.abs(val)*0.8)})`) : undefined
+                                        }}
+                                    >
+                                        {Math.round(val * 10) / 10}
+                                    </div>
+                                );
+                            })
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Main Logic ---
+
+        function App() {
+            // State
+            const [inputGrid, setInputGrid] = useState(PRESETS["X Shape"]);
+            const [kernelType, setKernelType] = useState("Vertical Edge");
+            const [isPlaying, setIsPlaying] = useState(false);
+            const [pipelineStep, setPipelineStep] = useState(0); // 0:Input, 1:Conv, 2:ReLU, 3:Pool, 4:Flat, 5:Class
+            
+            // Animation States
+            const [animState, setAnimState] = useState({
+                conv: { r: 0, c: 0 },
+                pool: { r: 0, c: 0 }
+            });
+
+            // Derived Data
+            const kernel = KERNELS[kernelType];
+            const convOutput = useMemo(() => {
+                let out = Array(4).fill().map(() => Array(4).fill(0));
+                for(let r=0; r<4; r++) {
+                    for(let c=0; c<4; c++) {
+                        let sum = 0;
+                        for(let kr=0; kr<3; kr++) 
+                            for(let kc=0; kc<3; kc++) 
+                                sum += inputGrid[r+kr][c+kc] * kernel[kr][kc];
+                        out[r][c] = sum;
+                    }
+                }
+                return out;
+            }, [inputGrid, kernel]);
+
+            const reluOutput = useMemo(() => convOutput.map(row => row.map(v => Math.max(0, v))), [convOutput]);
+            
+            const poolOutput = useMemo(() => {
+                let out = Array(2).fill().map(() => Array(2).fill(0));
+                for(let r=0; r<2; r++) {
+                    for(let c=0; c<2; c++) {
+                        out[r][c] = Math.max(
+                            reluOutput[r*2][c*2], reluOutput[r*2][c*2+1],
+                            reluOutput[r*2+1][c*2], reluOutput[r*2+1][c*2+1]
+                        );
+                    }
+                }
+                return out;
+            }, [reluOutput]);
+
+            const flatOutput = useMemo(() => poolOutput.flat(), [poolOutput]);
+            
+            // Mock classification based on simple heuristic (sum of edges)
+            const predictions = useMemo(() => {
+                const score = flatOutput.reduce((a,b) => a+b, 0);
+                return [
+                    { label: "Vertical Feature", score: kernelType.includes("Vertical") ? Math.min(99, score * 2) : 10 },
+                    { label: "Horizontal Feature", score: kernelType.includes("Horizontal") ? Math.min(99, score * 2) : 10 },
+                    { label: "Noise/Other", score: 100 - Math.min(99, score * 2) }
+                ].sort((a,b) => b.score - a.score);
+            }, [flatOutput, kernelType]);
+
+            // Animation Loop
+            useEffect(() => {
+                let interval;
+                if (isPlaying) {
+                    interval = setInterval(() => {
+                        stepForward();
+                    }, 600); // Speed of auto-play
+                }
+                return () => clearInterval(interval);
+            }, [isPlaying, pipelineStep, animState]);
+
+            const stepForward = () => {
+                if (pipelineStep === 0) { setPipelineStep(1); return; }
+                
+                if (pipelineStep === 1) {
+                    // Convolution Loop
+                    const { r, c } = animState.conv;
+                    if (c < 3) setAnimState(p => ({ ...p, conv: { r, c: c+1 }}));
+                    else if (r < 3) setAnimState(p => ({ ...p, conv: { r: r+1, c: 0 }}));
+                    else {
+                        setPipelineStep(2); // Done Conv -> Go ReLU
+                        setAnimState(p => ({ ...p, conv: { r: 0, c: 0 }})); // Reset for next time
+                    }
+                    return;
+                }
+
+                if (pipelineStep === 2) { setPipelineStep(3); return; } // Instant ReLU
+
+                if (pipelineStep === 3) {
+                    // Pooling Loop
+                    const { r, c } = animState.pool;
+                    if (c < 1) setAnimState(p => ({ ...p, pool: { r, c: c+1 }}));
+                    else if (r < 1) setAnimState(p => ({ ...p, pool: { r: r+1, c: 0 }}));
+                    else {
+                         setPipelineStep(4); // Done Pool -> Flat
+                         setAnimState(p => ({ ...p, pool: { r: 0, c: 0 }}));
+                    }
+                    return;
+                }
+
+                if (pipelineStep === 4) { setPipelineStep(5); return; } // Flat -> Class
+                if (pipelineStep === 5) { setIsPlaying(false); return; } // End
+            };
+
+            const reset = () => {
+                setIsPlaying(false);
+                setPipelineStep(0);
+                setAnimState({ conv: { r: 0, c: 0 }, pool: { r: 0, c: 0 } });
+            };
+
+            // Math Box Logic Generator
+            const getMathData = () => {
+                if (pipelineStep === 1) {
+                    const { r, c } = animState.conv;
+                    let eq = "";
+                    let res = 0;
+                    for(let kr=0; kr<3; kr++) 
+                        for(let kc=0; kc<3; kc++) {
+                            const p = inputGrid[r+kr][c+kc];
+                            const k = kernel[kr][kc];
+                            if (k !== 0) eq += `(${p}×${k}) + `;
+                            res += p*k;
+                        }
+                    return { title: "Convolution (Dot Product)", equation: eq.slice(0, -3) || "0", result: res };
+                }
+                if (pipelineStep === 3) {
+                    const { r, c } = animState.pool;
+                    const v1 = reluOutput[r*2][c*2];
+                    const v2 = reluOutput[r*2][c*2+1];
+                    const v3 = reluOutput[r*2+1][c*2];
+                    const v4 = reluOutput[r*2+1][c*2+1];
+                    return { title: "Max Pooling", equation: `max(${Math.round(v1)}, ${Math.round(v2)}, ${Math.round(v3)}, ${Math.round(v4)})`, result: Math.max(v1,v2,v3,v4) };
+                }
+                return null;
+            };
+
+            const mathData = getMathData();
+
+            // Drawing Handler
+            const handleDraw = (r, c) => {
+                if (isPlaying) return; // Lock during animation
+                if (r === -1) return;
+                const newGrid = [...inputGrid.map(row => [...row])];
+                newGrid[r][c] = newGrid[r][c] === 0 ? 1 : 0; // Toggle
+                setInputGrid(newGrid);
+            };
+
+            return (
+                <div className="min-h-screen bg-grid-pattern overflow-hidden flex flex-col">
+                    
+                    {/* Navbar */}
+                    <nav className="glass-panel border-b border-gray-800 px-6 py-4 flex items-center justify-between sticky top-0 z-50">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-blue-600/20 p-2 rounded-lg border border-blue-500/30">
+                                <Icon name="eye" className="text-blue-400" />
+                            </div>
+                            <div>
+                                <h1 className="font-bold text-lg tracking-tight text-white">CNN Glass-Box</h1>
+                                <p className="text-[10px] text-gray-400 font-mono uppercase">Feature Extraction Pipeline</p>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center gap-4 bg-black/40 p-1 rounded-lg border border-gray-800">
+                            <button onClick={() => setIsPlaying(!isPlaying)} className="p-2 hover:bg-gray-700 rounded-md transition-colors text-green-400">
+                                {isPlaying ? <Icon name="pause" /> : <Icon name="play" />}
+                            </button>
+                            <button onClick={stepForward} className="p-2 hover:bg-gray-700 rounded-md transition-colors text-blue-400">
+                                <Icon name="step" />
+                            </button>
+                            <button onClick={reset} className="p-2 hover:bg-gray-700 rounded-md transition-colors text-red-400">
+                                <Icon name="refresh" />
+                            </button>
+                        </div>
+                    </nav>
+
+                    {/* Main Stage */}
+                    <main className="flex-1 flex flex-col lg:flex-row p-6 gap-6 overflow-hidden relative">
+                        
+                      {/* Left: Controls */}
+                        <div className="w-full lg:w-64 flex flex-col gap-6 shrink-0 z-20">
+                            <div className="glass-panel p-4 rounded-xl">
+                                <h3 className="text-xs font-bold text-gray-400 uppercase mb-3">Input Preset</h3>
+                                <div className="grid grid-cols-2 gap-2">
+                                    {Object.keys(PRESETS).map(k => (
+                                        <button 
+                                            key={k} 
+                                            onClick={() => { setInputGrid(PRESETS[k]); reset(); }}
+                                            className={`text-xs p-2 rounded border transition-all ${JSON.stringify(inputGrid) === JSON.stringify(PRESETS[k]) ? 'bg-blue-600 border-blue-400 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500'}`}
+                                        >
+                                            {k}
+                                        </button>
+                                    ))}
+                                </div>
+                                <div className="mt-4 p-2 bg-blue-900/20 border border-blue-500/20 rounded text-[10px] text-blue-300 flex gap-2 items-center">
+                                    <Icon name="edit" size={14} />
+                                    <span>Click input grid to draw!</span>
+                                </div>
+                            </div>
+
+                            <div className="glass-panel p-4 rounded-xl">
+                                <h3 className="text-xs font-bold text-gray-400 uppercase mb-3">Filter (Kernel)</h3>
+                                <div className="flex flex-col gap-2">
+                                    {Object.keys(KERNELS).map(k => (
+                                        <button 
+                                            key={k} 
+                                            onClick={() => { setKernelType(k); reset(); }}
+                                            className={`text-xs p-2 rounded border text-left transition-all ${kernelType === k ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800 border-gray-700 text-gray-400'}`}
+                                        >
+                                            {k}
+                                        </button>
+                                    ))}
+                                </div>
+                                {/* Mini Kernel Vis */}
+                                <div className="mt-3 grid grid-cols-3 gap-1 w-fit mx-auto p-1 bg-black rounded">
+                                    {KERNELS[kernelType].flat().map((v, i) => (
+                                        <div key={i} className={`w-4 h-4 flex items-center justify-center text-[8px] ${v !== 0 ? 'bg-gray-600 text-white' : 'bg-gray-900 text-gray-600'}`}>
+                                            {v}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Middle: Pipeline Visualization */}
+                        <div className="flex-1 flex items-center gap-8 overflow-x-auto px-4 pb-4 custom-scrollbar z-10">
+                            
+                            {/* 1. Input */}
+                            <div className="flex flex-col items-center gap-2">
+                                <Grid 
+                                    data={inputGrid} 
+                                    label="Input Image (6x6)" 
+                                    colorTheme="blue"
+                                    active={true}
+                                    highlight={pipelineStep === 1 ? { r: animState.conv.r, c: animState.conv.c, w: 3, h: 3 } : null}
+                                    onCellClick={handleDraw}
+                                />
+                            </div>
+
+                            {/* Connection Line */}
+                            <div className={`h-1 w-8 transition-colors duration-300 ${pipelineStep >= 1 ? 'bg-blue-500 shadow-[0_0_10px_#3b82f6]' : 'bg-gray-800'}`}></div>
+
+                            {/* 2. Convolution + ReLU */}
+                            <div className="flex flex-col items-center gap-4">
+                                <Grid 
+                                    data={pipelineStep >= 2 ? reluOutput : convOutput} 
+                                    label={pipelineStep >= 2 ? "ReLU Activation" : "Feature Map (4x4)"}
+                                    colorTheme="purple"
+                                    active={pipelineStep >= 1}
+                                    highlight={pipelineStep === 1 ? { r: animState.conv.r, c: animState.conv.c, w: 1, h: 1 } : (pipelineStep === 3 ? { r: animState.pool.r * 2, c: animState.pool.c * 2, w: 2, h: 2 } : null)}
+                                />
+                                <div className={`text-[10px] font-mono transition-opacity ${pipelineStep >= 2 ? 'text-yellow-400 opacity-100' : 'opacity-0'}`}>
+                                    Negative values &rarr; 0
+                                </div>
+                            </div>
+
+                            {/* Connection Line */}
+                            <div className={`h-1 w-8 transition-colors duration-300 ${pipelineStep >= 3 ? 'bg-purple-500 shadow-[0_0_10px_#a855f7]' : 'bg-gray-800'}`}></div>
+
+                            {/* 3. Pooling */}
+                            <div className="flex flex-col items-center gap-2">
+                                <Grid 
+                                    data={poolOutput} 
+                                    label="Max Pooling (2x2)" 
+                                    colorTheme="green"
+                                    active={pipelineStep >= 3}
+                                    highlight={pipelineStep === 3 ? { r: animState.pool.r, c: animState.pool.c, w: 1, h: 1 } : null}
+                                />
+                            </div>
+
+                            {/* Connection Line */}
+                            <div className={`h-1 w-8 transition-colors duration-300 ${pipelineStep >= 4 ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : 'bg-gray-800'}`}></div>
+
+                            {/* 4. Flatten & Classify */}
+                            <div className={`flex gap-4 items-center transition-all duration-500 ${pipelineStep >= 4 ? 'opacity-100 translate-x-0' : 'opacity-30 translate-x-4'}`}>
+                                {/* Flat Vector */}
+                                <div className="bg-gray-900 p-2 rounded border border-gray-700 flex flex-col gap-1 h-32 flex-wrap w-8 content-center">
+                                    {flatOutput.map((v, i) => (
+                                        <div key={i} className="w-1.5 h-1.5 rounded-full bg-red-500" style={{ opacity: Math.min(1, v/3 + 0.2) }}></div>
+                                    ))}
+                                </div>
+                                
+                                {/* Prediction Bars */}
+                                <div className="glass-panel p-4 rounded-xl w-48">
+                                    <h3 className="text-xs font-bold text-gray-400 uppercase mb-3">Confidence</h3>
+                                    <div className="space-y-2">
+                                        {predictions.map((p, i) => (
+                                            <div key={i} className="relative">
+                                                <div className="flex justify-between text-[10px] text-gray-400 mb-1">
+                                                    <span>{p.label}</span>
+                                                    <span>{Math.round(p.score)}%</span>
+                                                </div>
+                                                <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
+                                                    <div 
+                                                        className="h-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all duration-500 ease-out" 
+                                                        style={{ width: `${pipelineStep === 5 ? p.score : 5}%` }}
+                                                    ></div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+
+                        {/* Math Overlay */}
+                        <MathBox 
+                            visible={!!mathData && isPlaying} 
+                            title={mathData?.title} 
+                            equation={mathData?.equation} 
+                            result={mathData?.result} 
+                        />
+
+                        {/* SVG Connector Layer (Simplified Logic) */}
+                        {/* Active beams are implicitly handled by layout + highlights, but complex SVG curves require absolute positioning refs which is brittle in single-file React without massive code. The Highlights + MathBox provide clearer context than messy lines. */}
+
+                    </main>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
