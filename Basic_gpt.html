@@ -1,587 +1,28 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Play, RefreshCw, Info, ArrowRight, Zap, Brain, Database, MessageSquare, Activity, Grid, Layers, Cpu, Sigma } from 'lucide-react';
-
-// --- Constants & Advanced Data ---
-
-const STEPS = [
-  {
-    id: 'tokenization',
-    title: '1. Tokenization & Positional Encoding',
-    icon: <MessageSquare className="w-4 h-4" />,
-    shortDesc: 'Text -> Integers',
-    details: 'The raw string is split into sub-word units (tokens). Each token gets a unique ID from the vocabulary (e.g., "apple" -> 1842). Positional encodings are added so the model knows the order of words.',
-    technical: 'Input: String "Hello" \nOperation: Lookup(vocab) + Pos_Encoding(index)\nOutput: Vector [15496, 0, 1...]'
-  },
-  {
-    id: 'embedding',
-    title: '2. Embedding Lookup',
-    icon: <Database className="w-4 h-4" />,
-    shortDesc: 'Integers -> Dense Vectors',
-    details: 'Each token ID is swapped for a long list of numbers (a vector) learned during training. This vector represents the "meaning" of the word in high-dimensional space.',
-    technical: 'Matrix Op: OneHot(Token) × W_embedding\nDimensions: [Batch, Seq_Len, Hidden_Size]\nConcept: Semantic Space mapping.'
-  },
-  {
-    id: 'attention',
-    title: '3. Multi-Head Self-Attention',
-    icon: <Activity className="w-4 h-4" />,
-    shortDesc: 'Context Mixing (Q, K, V)',
-    details: 'The core magic. Tokens "talk" to each other. The model calculates Query (Q), Key (K), and Value (V) matrices. It figures out how much "attention" the current word should pay to previous words (e.g., "it" referring to "dog").',
-    technical: 'Attention(Q, K, V) = softmax(QK^T / sqrt(d_k))V\nheads: Multiple focus points\nOutput: Context-aware vectors.'
-  },
-  {
-    id: 'feedforward',
-    title: '4. Feed-Forward Network (MLP)',
-    icon: <Cpu className="w-4 h-4" />,
-    shortDesc: 'Thinking & Processing',
-    details: 'The information passes through a massive dense network. This layer processes the context gathered by attention and applies non-linear activation functions (like GeLU or ReLU) to "reason" about the data.',
-    technical: 'FFN(x) = max(0, xW_1 + b_1)W_2 + b_2\nActive Neurons: Fire based on learned patterns.\nRole: Storing facts and relational reasoning.'
-  },
-  {
-    id: 'logits',
-    title: '5. Logits & Softmax',
-    icon: <Sigma className="w-4 h-4" />,
-    shortDesc: 'Vectors -> Probabilities',
-    details: 'The final vector is projected back to the vocabulary size (Logits). A Softmax function squishes these raw numbers into probabilities between 0% and 100%.',
-    technical: 'P(w_i) = exp(logit_i) / sum(exp(logits))\nSelection: Greedy, Temperature sampling, or Top-K.'
-  }
-];
-
-// Expanded Mock Vocabulary
-const VOCAB = {
-  "hi": { id: 5301, next: ["there", "friend", "world"], type: "greeting" },
-  "hello": { id: 15496, next: ["world", "everyone", "human"], type: "greeting" },
-  "who": { id: 892, next: ["is", "are", "was"], type: "question" },
-  "the": { id: 464, next: ["cat", "future", "model"], type: "article" },
-  "artificial": { id: 1298, next: ["intelligence", "flavor", "flowers"], type: "adjective" },
-  "open": { id: 332, next: ["source", "door", "mind"], type: "verb/adj" },
-  "code": { id: 991, next: ["is", "generation", "blocks"], type: "noun" },
-  "default": { id: 0, next: ["...", "???", "data"], type: "unknown" }
-};
-
-// --- Visual Components ---
-
-const ConnectionLines = ({ active, startCount, endCount, startX, endX, startYStart, endYStart, gapStart, gapEnd, color }) => {
-  const lines = [];
-  // Create a dense web of lines
-  for (let i = 0; i < startCount; i++) {
-    for (let j = 0; j < endCount; j++) {
-      // Prune connections slightly for visual clarity unless active
-      if (!active && Math.random() > 0.15) continue;
-      
-      const isActivePath = active && Math.random() > 0.6; // Randomly highlight paths during activation
-      
-      lines.push(
-        <path
-          key={`line-${i}-${j}`}
-          d={`M ${startX} ${startYStart + i * gapStart} C ${(startX + endX) / 2} ${startYStart + i * gapStart}, ${(startX + endX) / 2} ${endYStart + j * gapEnd}, ${endX} ${endYStart + j * gapEnd}`}
-          stroke={isActivePath ? color : "rgba(255,255,255,0.03)"}
-          strokeWidth={isActivePath ? 1.5 : 0.5}
-          fill="none"
-          className={isActivePath ? "animate-pulse-fast" : ""}
-          style={{ transition: 'stroke 0.2s ease' }}
-        />
-      );
-    }
-  }
-  return <g>{lines}</g>;
-};
-
-// A specialized Matrix view for Embeddings
-const EmbeddingBlock = ({ active, color }) => (
-  <g>
-    {[...Array(6)].map((_, i) => (
-      <rect 
-        key={i} 
-        x="0" y={i * 12} width="40" height="10" 
-        fill={active ? color : "#1f2937"} 
-        className={`transition-colors duration-300 ${active ? 'animate-pulse' : ''}`}
-        stroke="#374151" strokeWidth="0.5"
-      />
-    ))}
-    <text x="20" y="85" textAnchor="middle" fill="#6b7280" fontSize="8">Vector</text>
-  </g>
-);
-
-// A specialized view for Attention Heads
-const AttentionHeads = ({ active }) => (
-  <g>
-     {/* 3 Heads */}
-    {[0, 1, 2].map((head) => (
-      <g key={head} transform={`translate(0, ${head * 25})`}>
-         <rect width="30" height="20" rx="4" fill={active ? "#ca8a04" : "#1f2937"} className="transition-colors duration-500" />
-         <text x="15" y="14" textAnchor="middle" fontSize="8" fill="white">H{head+1}</text>
-         {active && (
-           <>
-            <text x="40" y="10" fontSize="6" fill="#fbbf24" className="animate-fade-in">Q</text>
-            <text x="40" y="18" fontSize="6" fill="#fbbf24" className="animate-fade-in">K</text>
-            <text x="40" y="26" fontSize="6" fill="#fbbf24" className="animate-fade-in">V</text>
-           </>
-         )}
-      </g>
-    ))}
-  </g>
-);
-
-const TokenCard = ({ token, id, type }) => (
-  <div className="flex flex-col items-center bg-gray-800 border border-gray-700 rounded p-2 min-w-[80px] animate-in zoom-in">
-    <span className="text-[10px] text-gray-500 uppercase font-bold tracking-wider">{type}</span>
-    <span className="text-lg font-mono text-white font-bold my-1">"{token}"</span>
-    <span className="text-xs bg-gray-900 px-2 py-0.5 rounded text-blue-400 font-mono">{id}</span>
-  </div>
-);
-
-export default function AdvancedLLMVisualizer() {
-  const [inputValue, setInputValue] = useState('');
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [currentStep, setCurrentStep] = useState(-1); 
-  const [outputData, setOutputData] = useState(null);
-  const [showInfo, setShowInfo] = useState(false);
-  const [logs, setLogs] = useState([]);
-  
-  const processingRef = useRef(false);
-  const logsEndRef = useRef(null);
-
-  const addLog = (msg) => {
-    setLogs(prev => [...prev, msg]);
-  };
-
-  const processInput = () => {
-    if (!inputValue.trim()) return;
-    if (processingRef.current) return;
-
-    setIsProcessing(true);
-    processingRef.current = true;
-    setCurrentStep(0);
-    setOutputData(null);
-    setLogs([]);
-
-    const lowerInput = inputValue.toLowerCase().trim();
-    const vocabMatch = VOCAB[lowerInput] || VOCAB["default"];
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced LLM Architecture Visualizer</title>
     
-    // Timeline configuration
-    const timeline = [
-      { step: 0, delay: 500, msg: `[Tokenization] Splitting "${inputValue}"... Found ID: ${vocabMatch.id}` },
-      { step: 1, delay: 2000, msg: `[Embedding] Looking up vector space for ID ${vocabMatch.id}...` },
-      { step: 2, delay: 4000, msg: `[Attention] Calculating Q, K, V matrices. Applying masking...` },
-      { step: 3, delay: 6000, msg: `[Feed Forward] Expanding to hidden dimension (4x). Applying GeLU activation...` },
-      { step: 4, delay: 8000, msg: `[Logits] Projecting back to vocabulary size. Computing Softmax...` },
-    ];
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    timeline.forEach(({ step, delay, msg }) => {
-      setTimeout(() => {
-        setCurrentStep(step);
-        addLog(msg);
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
         
-        if (step === 4) {
-           // Finalize
-           setTimeout(() => {
-              const totalScore = 100;
-              const s1 = Math.floor(Math.random() * 20) + 65;
-              const s2 = Math.floor((totalScore - s1) * 0.6);
-              const s3 = totalScore - s1 - s2;
-              
-              setOutputData({
-                predictions: [
-                  { word: vocabMatch.next[0], score: s1 },
-                  { word: vocabMatch.next[1], score: s2 },
-                  { word: vocabMatch.next[2], score: s3 },
-                ]
-              });
-              setIsProcessing(false);
-              processingRef.current = false;
-              addLog(`[Output] Selected token: "${vocabMatch.next[0]}" (${s1}%)`);
-           }, 1500);
-        }
-      }, delay);
-    });
-  };
-
-  const handleReset = () => {
-    setInputValue('');
-    setCurrentStep(-1);
-    setOutputData(null);
-    setIsProcessing(false);
-    setLogs([]);
-    processingRef.current = false;
-  };
-
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
-
-  return (
-    <div className="min-h-screen bg-[#0a0a0f] text-gray-100 font-sans selection:bg-blue-500/30 overflow-hidden">
-      
-      {/* Top Bar */}
-      <header className="border-b border-gray-800 bg-gray-900/50 backdrop-blur-md sticky top-0 z-20">
-        <div className="max-w-[1600px] mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <div className="p-2 bg-indigo-600 rounded-lg shadow-[0_0_15px_rgba(79,70,229,0.5)]">
-              <Brain className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-white tracking-tight">
-                LLM Architecture Explorer
-              </h1>
-              <p className="text-xs text-blue-300 font-mono">Transformer Model V2.0 (Instructional)</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="hidden md:flex text-xs font-mono text-gray-500 gap-4">
-              <span>d_model: 512</span>
-              <span>layers: 12</span>
-              <span>heads: 8</span>
-              <span>vocab: 50k</span>
-            </div>
-            <button 
-              onClick={() => setShowInfo(!showInfo)}
-              className="p-2 hover:bg-gray-800 rounded-full transition-colors text-gray-400 hover:text-white"
-            >
-              <Info className="w-5 h-5" />
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <main className="max-w-[1600px] mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-80px)]">
-        
-        {/* LEFT PANEL: Controls & Step Logic */}
-        <div className="lg:col-span-3 flex flex-col gap-4 h-full overflow-y-auto pr-2 custom-scrollbar">
-          
-          {/* Input Control */}
-          <div className="bg-gray-900/80 border border-gray-800 rounded-xl p-5 shadow-lg backdrop-blur">
-            <label className="block text-xs font-bold text-blue-400 uppercase mb-3 tracking-wider">
-              Input Prompt
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && processInput()}
-                placeholder='Try "Artificial", "Open"...'
-                className="flex-1 bg-black/50 border border-gray-700 rounded-lg px-4 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all text-sm font-mono text-white"
-                disabled={isProcessing}
-              />
-              <button
-                onClick={processInput}
-                disabled={isProcessing || !inputValue}
-                className={`px-3 rounded-lg flex items-center justify-center transition-all ${
-                  isProcessing 
-                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                    : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg'
-                }`}
-              >
-                {isProcessing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
-              </button>
-            </div>
-            {outputData && (
-                 <button onClick={handleReset} className="mt-3 w-full py-1.5 text-xs border border-red-900/50 bg-red-900/10 text-red-400 hover:bg-red-900/20 rounded transition-colors">
-                   Reset Simulation
-                 </button>
-             )}
-          </div>
-
-          {/* Phase Tracker */}
-          <div className="flex-1 space-y-2">
-             <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider pl-1">Processing Pipeline</h3>
-             {STEPS.map((step, idx) => {
-               const isActive = currentStep === idx;
-               return (
-                 <div 
-                   key={step.id}
-                   className={`group relative p-3 rounded-lg border transition-all duration-300 ${
-                     isActive 
-                       ? 'bg-indigo-900/20 border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.1)]' 
-                       : currentStep > idx 
-                         ? 'bg-gray-900/50 border-gray-800 opacity-60' 
-                         : 'bg-transparent border-transparent opacity-30'
-                   }`}
-                 >
-                    <div className="flex items-start gap-3">
-                      <div className={`mt-1 p-1.5 rounded ${isActive ? 'bg-indigo-500 text-white' : 'bg-gray-800 text-gray-400'}`}>
-                        {step.icon}
-                      </div>
-                      <div>
-                        <div className="text-sm font-bold text-gray-200">{step.title}</div>
-                        <div className="text-xs text-gray-500 mt-0.5">{step.shortDesc}</div>
-                        
-                        {/* Dynamic Details showing only when active */}
-                        <div className={`grid transition-[grid-template-rows] duration-500 ease-in-out ${isActive ? 'grid-rows-[1fr] mt-2' : 'grid-rows-[0fr]'}`}>
-                           <div className="overflow-hidden">
-                              <p className="text-[11px] text-indigo-200 leading-relaxed bg-indigo-950/30 p-2 rounded border border-indigo-500/20">
-                                {step.technical}
-                              </p>
-                           </div>
-                        </div>
-                      </div>
-                    </div>
-                 </div>
-               )
-             })}
-          </div>
-
-        </div>
-
-        {/* CENTER/RIGHT: Visualization & System Monitor */}
-        <div className="lg:col-span-9 flex flex-col h-full gap-6">
-          
-          {/* Main Visualization Canvas */}
-          <div className="relative flex-1 bg-[#0f1115] border border-gray-800 rounded-xl overflow-hidden shadow-2xl flex flex-col">
-            
-            {/* Scene Background */}
-            <div className="absolute inset-0" style={{ 
-                 backgroundImage: 'linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)', 
-                 backgroundSize: '40px 40px' 
-               }}>
-            </div>
-
-            {/* Header inside Canvas */}
-            <div className="relative z-10 p-4 flex justify-between items-start pointer-events-none">
-               <div className="bg-black/40 backdrop-blur px-3 py-1 rounded border border-gray-700 text-xs text-green-400 font-mono flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                  System Ready
-               </div>
-               <div className="text-right">
-                  <div className="text-[10px] text-gray-500 font-mono">LAYER DEPTH</div>
-                  <div className="text-xl font-bold text-gray-700">12</div>
-               </div>
-            </div>
-
-            {/* The Network Diagram */}
-            <div className="flex-1 flex items-center justify-center relative overflow-x-auto custom-scrollbar">
-               <div className="min-w-[800px] h-[400px] relative">
-                  
-                  <svg className="absolute inset-0 w-full h-full overflow-visible pointer-events-none z-0">
-                     {/* Token -> Embed */}
-                     <ConnectionLines 
-                        active={currentStep >= 1} 
-                        startCount={1} endCount={6} 
-                        startX={100} endX={250} 
-                        startYStart={200} endYStart={100} 
-                        gapStart={0} gapEnd={35}
-                        color="#a855f7" // Purple
-                     />
-                     {/* Embed -> Attention */}
-                     <ConnectionLines 
-                        active={currentStep >= 2} 
-                        startCount={6} endCount={3} 
-                        startX={250} endX={450} 
-                        startYStart={100} endYStart={150} 
-                        gapStart={35} gapEnd={50}
-                        color="#eab308" // Yellow
-                     />
-                     {/* Attention -> FF */}
-                     <ConnectionLines 
-                        active={currentStep >= 3} 
-                        startCount={3} endCount={8} 
-                        startX={450} endX={650} 
-                        startYStart={150} endYStart={80} 
-                        gapStart={50} gapEnd={30}
-                        color="#22c55e" // Green
-                     />
-                     {/* FF -> Logits */}
-                     <ConnectionLines 
-                        active={currentStep >= 4} 
-                        startCount={8} endCount={5} 
-                        startX={650} endX={850} 
-                        startYStart={80} endYStart={120} 
-                        gapStart={30} gapEnd={40}
-                        color="#ef4444" // Red
-                     />
-                  </svg>
-
-                  {/* Nodes Layer */}
-                  <div className="absolute inset-0 pointer-events-none">
-                     
-                     {/* 1. Token Node */}
-                     <div className="absolute left-[60px] top-[180px] w-20 h-10 flex items-center justify-center">
-                        {inputValue && (
-                           <div className={`transition-all duration-500 ${currentStep >= 0 ? 'scale-100 opacity-100' : 'scale-0 opacity-0'}`}>
-                              <div className="bg-blue-900/80 border border-blue-500 text-blue-100 px-3 py-1 rounded text-xs font-mono shadow-[0_0_10px_rgba(59,130,246,0.5)]">
-                                 ID: {VOCAB[inputValue.toLowerCase()]?.id || 0}
-                              </div>
-                           </div>
-                        )}
-                     </div>
-                     <div className="absolute left-[80px] top-[230px] text-[10px] text-gray-500 font-mono tracking-widest rotate-90 origin-left">INPUT</div>
-
-                     {/* 2. Embedding Layer */}
-                     <div className="absolute left-[250px] top-[100px]">
-                        <EmbeddingBlock active={currentStep === 1} color="#a855f7" />
-                        <div className="absolute -top-8 left-0 text-[10px] text-purple-400 font-bold uppercase tracking-wider">Embedding</div>
-                     </div>
-
-                     {/* 3. Attention Layer */}
-                     <div className="absolute left-[450px] top-[150px]">
-                        <AttentionHeads active={currentStep === 2} />
-                        <div className="absolute -top-8 left-0 text-[10px] text-yellow-500 font-bold uppercase tracking-wider">Multi-Head Attn</div>
-                     </div>
-
-                     {/* 4. Feed Forward Layer */}
-                     <div className="absolute left-[650px] top-[80px]">
-                        <div className="flex flex-col gap-2">
-                           {[...Array(8)].map((_, i) => (
-                              <div key={i} className={`w-3 h-3 rounded-full border border-green-800 transition-all duration-300 ${currentStep === 3 && (i % 2 === 0) ? 'bg-green-500 shadow-[0_0_10px_#22c55e]' : 'bg-gray-900'}`}></div>
-                           ))}
-                        </div>
-                        <div className="absolute -top-8 left-0 text-[10px] text-green-500 font-bold uppercase tracking-wider">Feed Fwd</div>
-                     </div>
-
-                     {/* 5. Logits / Output */}
-                     <div className="absolute left-[850px] top-[120px]">
-                        <div className="flex flex-col gap-3 items-start">
-                           {[...Array(5)].map((_, i) => (
-                              <div key={i} className="flex items-center gap-2">
-                                 <div className={`h-2 rounded-full transition-all duration-700 ${currentStep === 4 ? 'bg-red-500 w-12 shadow-[0_0_10px_#ef4444]' : 'bg-gray-800 w-4'}`}></div>
-                              </div>
-                           ))}
-                        </div>
-                         <div className="absolute -top-8 left-0 text-[10px] text-red-500 font-bold uppercase tracking-wider">Logits</div>
-                     </div>
-
-                  </div>
-               </div>
-            </div>
-
-            {/* Real-Time Output Overlay */}
-            {outputData && (
-               <div className="absolute bottom-6 right-6 bg-gray-900/90 backdrop-blur border border-gray-700 rounded-xl p-4 w-64 shadow-2xl animate-in slide-in-from-right-10">
-                  <h4 className="text-xs text-gray-400 uppercase mb-2 flex justify-between">
-                     <span>Probability Dist.</span>
-                     <Activity className="w-3 h-3 text-green-500" />
-                  </h4>
-                  <div className="space-y-2">
-                     {outputData.predictions.map((p, i) => (
-                        <div key={i} className="flex items-center justify-between text-sm">
-                           <span className="font-mono text-white">"{p.word}"</span>
-                           <div className="flex items-center gap-2">
-                              <div className="w-16 h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                                 <div className="h-full bg-green-500" style={{ width: `${p.score}%` }}></div>
-                              </div>
-                              <span className="text-[10px] text-gray-400 w-6 text-right">{p.score}%</span>
-                           </div>
-                        </div>
-                     ))}
-                  </div>
-               </div>
-            )}
-
-          </div>
-
-          {/* Bottom Panel: System Logs & Context */}
-          <div className="h-48 bg-[#0f1115] border border-gray-800 rounded-xl p-4 flex gap-4">
-             
-             {/* Terminal / Log View */}
-             <div className="flex-1 flex flex-col font-mono text-xs">
-                <div className="flex items-center gap-2 text-gray-400 border-b border-gray-800 pb-2 mb-2">
-                   <div className="flex gap-1.5">
-                      <div className="w-2.5 h-2.5 rounded-full bg-red-500/20 border border-red-500/50"></div>
-                      <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/20 border border-yellow-500/50"></div>
-                      <div className="w-2.5 h-2.5 rounded-full bg-green-500/20 border border-green-500/50"></div>
-                   </div>
-                   <span className="ml-2">debug_console.log</span>
-                </div>
-                <div className="flex-1 overflow-y-auto space-y-1 custom-scrollbar pr-2">
-                   {!logs.length && <span className="text-gray-600 italic">Waiting for input stream...</span>}
-                   {logs.map((log, i) => (
-                      <div key={i} className="text-gray-300 border-l-2 border-indigo-500/30 pl-2 py-0.5 animate-in fade-in slide-in-from-left-2">
-                         <span className="text-indigo-400 mr-2">[{new Date().toLocaleTimeString().split(' ')[0]}]</span>
-                         {log}
-                      </div>
-                   ))}
-                   <div ref={logsEndRef} />
-                </div>
-             </div>
-
-             {/* Context Window Visual */}
-             <div className="w-1/3 border-l border-gray-800 pl-4 flex flex-col">
-                <h4 className="text-xs text-gray-400 uppercase mb-2 font-bold">Context Window</h4>
-                <div className="flex-1 bg-gray-900 rounded border border-dashed border-gray-700 p-2 overflow-hidden">
-                   {/* Simulate tokens sitting in context */}
-                   <div className="flex flex-wrap gap-1.5 content-start h-full">
-                      <span className="px-1.5 py-0.5 bg-gray-800 text-gray-500 text-[10px] rounded border border-gray-700">&lt;bos&gt;</span>
-                      {inputValue && <span className="px-1.5 py-0.5 bg-blue-900/30 text-blue-300 text-[10px] rounded border border-blue-800/50">{inputValue}</span>}
-                      {outputData && <span className="px-1.5 py-0.5 bg-green-900/30 text-green-300 text-[10px] rounded border border-green-800/50 animate-pulse">{outputData.predictions[0].word}</span>}
-                      <span className="w-1 h-3 bg-gray-500 animate-pulse ml-0.5 self-center"></span>
-                   </div>
-                </div>
-                <div className="mt-2 flex justify-between text-[10px] text-gray-500">
-                   <span>Used: {inputValue ? 2 : 0}/2048</span>
-                   <span>Temp: 0.7</span>
-                </div>
-             </div>
-
-          </div>
-
-        </div>
-
-      </main>
-
-      {/* Detailed Info Modal */}
-      {showInfo && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#0f1115] border border-gray-700 max-w-2xl w-full rounded-2xl p-8 shadow-2xl relative overflow-hidden">
-             {/* Decorative BG */}
-            <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-600/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
-
-            <h2 className="text-2xl font-bold mb-6 flex items-center gap-3 text-white relative z-10">
-              <Layers className="w-6 h-6 text-indigo-400" />
-              Understanding the Architecture
-            </h2>
-            
-            <div className="space-y-6 text-sm text-gray-300 leading-relaxed relative z-10">
-              
-              <div className="flex gap-4">
-                 <div className="min-w-[40px] h-10 rounded bg-purple-900/30 flex items-center justify-center border border-purple-500/30">
-                    <Database className="w-5 h-5 text-purple-400" />
-                 </div>
-                 <div>
-                    <h3 className="text-white font-bold mb-1">Embeddings</h3>
-                    <p className="text-gray-400">Words are converted into fixed-size vectors. In a real GPT model, these vectors have 12,288 dimensions! Here, we visualize them as 6 simple blocks.</p>
-                 </div>
-              </div>
-
-              <div className="flex gap-4">
-                 <div className="min-w-[40px] h-10 rounded bg-yellow-900/30 flex items-center justify-center border border-yellow-500/30">
-                    <Activity className="w-5 h-5 text-yellow-400" />
-                 </div>
-                 <div>
-                    <h3 className="text-white font-bold mb-1">Attention (Q, K, V)</h3>
-                    <p className="text-gray-400">
-                       Imagine a filing system. 
-                       <br/><strong>Query (Q):</strong> What am I looking for?
-                       <br/><strong>Key (K):</strong> What content does this file have?
-                       <br/><strong>Value (V):</strong> The actual content of the file.
-                       <br/>The model multiplies Q and K to find the best match, then extracts V.
-                    </p>
-                 </div>
-              </div>
-
-              <div className="flex gap-4">
-                 <div className="min-w-[40px] h-10 rounded bg-green-900/30 flex items-center justify-center border border-green-500/30">
-                    <Cpu className="w-5 h-5 text-green-400" />
-                 </div>
-                 <div>
-                    <h3 className="text-white font-bold mb-1">Feed Forward (MLP)</h3>
-                    <p className="text-gray-400">This is where the model "thinks". It's a standard neural network layer that processes the information gathered by attention. It has 4x as many neurons as the embedding size.</p>
-                 </div>
-              </div>
-
-            </div>
-
-            <button 
-              onClick={() => setShowInfo(false)}
-              className="mt-8 w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-lg text-white font-bold transition-all shadow-lg hover:shadow-indigo-500/25"
-            >
-              Return to Simulation
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Custom Scrollbar Styles */}
-      <style>{`
+        /* Custom Scrollbar */
         .custom-scrollbar::-webkit-scrollbar {
           width: 6px;
           height: 6px;
@@ -597,9 +38,483 @@ export default function AdvancedLLMVisualizer() {
         .custom-scrollbar::-webkit-scrollbar-thumb:hover {
           background: #6b7280;
         }
-      `}</style>
-    </div>
-  );
-}
+
+        @keyframes pulse-fast {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .animate-pulse-fast {
+            animation: pulse-fast 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+    </style>
+</head>
+<body class="bg-[#0a0a0f] text-gray-100 overflow-hidden">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- Icons Components (Manually defined for standalone HTML) ---
+        const IconWrapper = ({ children, className }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+                {children}
+            </svg>
+        );
+
+        const Brain = ({ className }) => <IconWrapper className={className}><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></IconWrapper>;
+        const Activity = ({ className }) => <IconWrapper className={className}><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></IconWrapper>;
+        const Database = ({ className }) => <IconWrapper className={className}><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></IconWrapper>;
+        const MessageSquare = ({ className }) => <IconWrapper className={className}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></IconWrapper>;
+        const Cpu = ({ className }) => <IconWrapper className={className}><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3"/><path d="M15 1v3"/><path d="M9 20v3"/><path d="M15 20v3"/><path d="M20 9h3"/><path d="M20 14h3"/><path d="M1 9h3"/><path d="M1 14h3"/></IconWrapper>;
+        const Layers = ({ className }) => <IconWrapper className={className}><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></IconWrapper>;
+        const Play = ({ className }) => <IconWrapper className={className}><polygon points="5 3 19 12 5 21 5 3"/></IconWrapper>;
+        const RefreshCw = ({ className }) => <IconWrapper className={className}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></IconWrapper>;
+        const Info = ({ className }) => <IconWrapper className={className}><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></IconWrapper>;
+        const Zap = ({ className }) => <IconWrapper className={className}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></IconWrapper>;
+        const ArrowRight = ({ className }) => <IconWrapper className={className}><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></IconWrapper>;
+        const Sigma = ({ className }) => <IconWrapper className={className}><path d="M18 7V4H6l6 8-6 8h12v-3"/></IconWrapper>;
 
 
+        // --- Constants ---
+        const STEPS = [
+          {
+            id: 'tokenization',
+            title: '1. Tokenization',
+            icon: <MessageSquare className="w-4 h-4" />,
+            shortDesc: 'Text -> Integers',
+            details: 'The raw string is split into sub-word units (tokens). Each token gets a unique ID from the vocabulary.',
+            technical: 'Input: String "Hello" \nOperation: Lookup(vocab) + Pos_Encoding(index)\nOutput: Vector [15496, 0, 1...]'
+          },
+          {
+            id: 'embedding',
+            title: '2. Embedding',
+            icon: <Database className="w-4 h-4" />,
+            shortDesc: 'Integers -> Dense Vectors',
+            details: 'Each token ID is swapped for a long list of numbers (a vector) learned during training.',
+            technical: 'Matrix Op: OneHot(Token) × W_embedding\nDimensions: [Batch, Seq_Len, Hidden_Size]\nConcept: Semantic Space mapping.'
+          },
+          {
+            id: 'attention',
+            title: '3. Attention (Q, K, V)',
+            icon: <Activity className="w-4 h-4" />,
+            shortDesc: 'Context Mixing',
+            details: 'Tokens "talk" to each other via Query, Key, and Value matrices to understand context.',
+            technical: 'Attention(Q, K, V) = softmax(QK^T / sqrt(d_k))V\nheads: Multiple focus points\nOutput: Context-aware vectors.'
+          },
+          {
+            id: 'feedforward',
+            title: '4. Feed-Forward (MLP)',
+            icon: <Cpu className="w-4 h-4" />,
+            shortDesc: 'Processing',
+            details: 'Data passes through a dense network layer where non-linear activation functions (GeLU) fire.',
+            technical: 'FFN(x) = max(0, xW_1 + b_1)W_2 + b_2\nActive Neurons: Fire based on learned patterns.\nRole: Reasoning.'
+          },
+          {
+            id: 'logits',
+            title: '5. Logits & Softmax',
+            icon: <Sigma className="w-4 h-4" />,
+            shortDesc: 'Vectors -> Probabilities',
+            details: 'The final vector is projected back to vocabulary size and squished into probabilities.',
+            technical: 'P(w_i) = exp(logit_i) / sum(exp(logits))\nSelection: Greedy, Temperature sampling, or Top-K.'
+          }
+        ];
+
+        const VOCAB = {
+          "hi": { id: 5301, next: ["there", "friend", "world"], type: "greeting" },
+          "hello": { id: 15496, next: ["world", "everyone", "human"], type: "greeting" },
+          "who": { id: 892, next: ["is", "are", "was"], type: "question" },
+          "the": { id: 464, next: ["cat", "future", "model"], type: "article" },
+          "artificial": { id: 1298, next: ["intelligence", "flavor", "flowers"], type: "adjective" },
+          "open": { id: 332, next: ["source", "door", "mind"], type: "verb/adj" },
+          "code": { id: 991, next: ["is", "generation", "blocks"], type: "noun" },
+          "default": { id: 0, next: ["...", "???", "data"], type: "unknown" }
+        };
+
+        // --- Visual Components ---
+        const ConnectionLines = ({ active, startCount, endCount, startX, endX, startYStart, endYStart, gapStart, gapEnd, color }) => {
+          const lines = [];
+          for (let i = 0; i < startCount; i++) {
+            for (let j = 0; j < endCount; j++) {
+              if (!active && Math.random() > 0.15) continue;
+              const isActivePath = active && Math.random() > 0.6;
+              
+              lines.push(
+                <path
+                  key={`line-${i}-${j}`}
+                  d={`M ${startX} ${startYStart + i * gapStart} C ${(startX + endX) / 2} ${startYStart + i * gapStart}, ${(startX + endX) / 2} ${endYStart + j * gapEnd}, ${endX} ${endYStart + j * gapEnd}`}
+                  stroke={isActivePath ? color : "rgba(255,255,255,0.03)"}
+                  strokeWidth={isActivePath ? 1.5 : 0.5}
+                  fill="none"
+                  className={isActivePath ? "animate-pulse-fast" : ""}
+                  style={{ transition: 'stroke 0.2s ease' }}
+                />
+              );
+            }
+          }
+          return <g>{lines}</g>;
+        };
+
+        const EmbeddingBlock = ({ active, color }) => (
+          <g>
+            {[...Array(6)].map((_, i) => (
+              <rect 
+                key={i} 
+                x="0" y={i * 12} width="40" height="10" 
+                fill={active ? color : "#1f2937"} 
+                className={`transition-colors duration-300 ${active ? 'animate-pulse' : ''}`}
+                stroke="#374151" strokeWidth="0.5"
+              />
+            ))}
+            <text x="20" y="85" textAnchor="middle" fill="#6b7280" fontSize="8">Vector</text>
+          </g>
+        );
+
+        const AttentionHeads = ({ active }) => (
+          <g>
+            {[0, 1, 2].map((head) => (
+              <g key={head} transform={`translate(0, ${head * 25})`}>
+                 <rect width="30" height="20" rx="4" fill={active ? "#ca8a04" : "#1f2937"} className="transition-colors duration-500" />
+                 <text x="15" y="14" textAnchor="middle" fontSize="8" fill="white">H{head+1}</text>
+                 {active && (
+                   <g>
+                    <text x="40" y="10" fontSize="6" fill="#fbbf24">Q</text>
+                    <text x="40" y="18" fontSize="6" fill="#fbbf24">K</text>
+                    <text x="40" y="26" fontSize="6" fill="#fbbf24">V</text>
+                   </g>
+                 )}
+              </g>
+            ))}
+          </g>
+        );
+
+        // --- Main App Component ---
+        function App() {
+            const [inputValue, setInputValue] = useState('');
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [currentStep, setCurrentStep] = useState(-1); 
+            const [outputData, setOutputData] = useState(null);
+            const [showInfo, setShowInfo] = useState(false);
+            const [logs, setLogs] = useState([]);
+            
+            const processingRef = useRef(false);
+            const logsEndRef = useRef(null);
+
+            const addLog = (msg) => {
+                setLogs(prev => [...prev, msg]);
+            };
+
+            const processInput = () => {
+                if (!inputValue.trim()) return;
+                if (processingRef.current) return;
+
+                setIsProcessing(true);
+                processingRef.current = true;
+                setCurrentStep(0);
+                setOutputData(null);
+                setLogs([]);
+
+                const lowerInput = inputValue.toLowerCase().trim();
+                const vocabMatch = VOCAB[lowerInput] || VOCAB["default"];
+                
+                const timeline = [
+                  { step: 0, delay: 500, msg: `[Tokenization] Splitting "${inputValue}"... Found ID: ${vocabMatch.id}` },
+                  { step: 1, delay: 2000, msg: `[Embedding] Looking up vector space for ID ${vocabMatch.id}...` },
+                  { step: 2, delay: 4000, msg: `[Attention] Calculating Q, K, V matrices. Applying masking...` },
+                  { step: 3, delay: 6000, msg: `[Feed Forward] Expanding to hidden dimension (4x). Applying GeLU activation...` },
+                  { step: 4, delay: 8000, msg: `[Logits] Projecting back to vocabulary size. Computing Softmax...` },
+                ];
+
+                timeline.forEach(({ step, delay, msg }) => {
+                  setTimeout(() => {
+                    setCurrentStep(step);
+                    addLog(msg);
+                    
+                    if (step === 4) {
+                       setTimeout(() => {
+                          const totalScore = 100;
+                          const s1 = Math.floor(Math.random() * 20) + 65;
+                          const s2 = Math.floor((totalScore - s1) * 0.6);
+                          const s3 = totalScore - s1 - s2;
+                          
+                          setOutputData({
+                            predictions: [
+                              { word: vocabMatch.next[0], score: s1 },
+                              { word: vocabMatch.next[1], score: s2 },
+                              { word: vocabMatch.next[2], score: s3 },
+                            ]
+                          });
+                          setIsProcessing(false);
+                          processingRef.current = false;
+                          addLog(`[Output] Selected token: "${vocabMatch.next[0]}" (${s1}%)`);
+                       }, 1500);
+                    }
+                  }, delay);
+                });
+            };
+
+            const handleReset = () => {
+                setInputValue('');
+                setCurrentStep(-1);
+                setOutputData(null);
+                setIsProcessing(false);
+                setLogs([]);
+                processingRef.current = false;
+            };
+
+            useEffect(() => {
+                logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }, [logs]);
+
+            return (
+                <div className="min-h-screen h-screen flex flex-col">
+                  
+                  {/* Header */}
+                  <header className="border-b border-gray-800 bg-gray-900/50 backdrop-blur-md shrink-0">
+                    <div className="max-w-[1600px] mx-auto px-6 py-4 flex items-center justify-between">
+                      <div className="flex items-center gap-4">
+                        <div className="p-2 bg-indigo-600 rounded-lg shadow-[0_0_15px_rgba(79,70,229,0.5)]">
+                          <Brain className="w-6 h-6 text-white" />
+                        </div>
+                        <div>
+                          <h1 className="text-xl font-bold text-white tracking-tight">
+                            LLM Architecture Explorer
+                          </h1>
+                          <p className="text-xs text-blue-300 font-mono">Transformer Model V2.0 (Instructional)</p>
+                        </div>
+                      </div>
+                      <button 
+                          onClick={() => setShowInfo(!showInfo)}
+                          className="p-2 hover:bg-gray-800 rounded-full transition-colors text-gray-400 hover:text-white"
+                        >
+                          <Info className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </header>
+
+                  {/* Main Layout */}
+                  <main className="flex-1 max-w-[1600px] mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6 overflow-hidden">
+                    
+                    {/* LEFT PANEL */}
+                    <div className="lg:col-span-3 flex flex-col gap-4 h-full overflow-y-auto pr-2 custom-scrollbar">
+                      
+                      {/* Controls */}
+                      <div className="bg-gray-900/80 border border-gray-800 rounded-xl p-5 shadow-lg backdrop-blur shrink-0">
+                        <label className="block text-xs font-bold text-blue-400 uppercase mb-3 tracking-wider">
+                          Input Prompt
+                        </label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={inputValue}
+                            onChange={(e) => setInputValue(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && processInput()}
+                            placeholder='Try "Hello", "Open"...'
+                            className="flex-1 bg-black/50 border border-gray-700 rounded-lg px-4 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all text-sm font-mono text-white"
+                            disabled={isProcessing}
+                          />
+                          <button
+                            onClick={processInput}
+                            disabled={isProcessing || !inputValue}
+                            className={`px-3 rounded-lg flex items-center justify-center transition-all ${
+                              isProcessing 
+                                ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                                : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg'
+                            }`}
+                          >
+                            {isProcessing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
+                          </button>
+                        </div>
+                        {outputData && (
+                             <button onClick={handleReset} className="mt-3 w-full py-1.5 text-xs border border-red-900/50 bg-red-900/10 text-red-400 hover:bg-red-900/20 rounded transition-colors">
+                               Reset Simulation
+                             </button>
+                         )}
+                      </div>
+
+                      {/* Steps */}
+                      <div className="flex-1 space-y-2">
+                         <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider pl-1">Processing Pipeline</h3>
+                         {STEPS.map((step, idx) => {
+                           const isActive = currentStep === idx;
+                           return (
+                             <div 
+                               key={step.id}
+                               className={`group relative p-3 rounded-lg border transition-all duration-300 ${
+                                 isActive 
+                                   ? 'bg-indigo-900/20 border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.1)]' 
+                                   : currentStep > idx 
+                                     ? 'bg-gray-900/50 border-gray-800 opacity-60' 
+                                     : 'bg-transparent border-transparent opacity-30'
+                               }`}
+                             >
+                                <div className="flex items-start gap-3">
+                                  <div className={`mt-1 p-1.5 rounded ${isActive ? 'bg-indigo-500 text-white' : 'bg-gray-800 text-gray-400'}`}>
+                                    {step.icon}
+                                  </div>
+                                  <div>
+                                    <div className="text-sm font-bold text-gray-200">{step.title}</div>
+                                    <div className="text-xs text-gray-500 mt-0.5">{step.shortDesc}</div>
+                                    <div className={`grid transition-[grid-template-rows] duration-500 ease-in-out ${isActive ? 'grid-rows-[1fr] mt-2' : 'grid-rows-[0fr]'}`}>
+                                       <div className="overflow-hidden">
+                                          <p className="text-[11px] text-indigo-200 leading-relaxed bg-indigo-950/30 p-2 rounded border border-indigo-500/20">
+                                            {step.technical}
+                                          </p>
+                                       </div>
+                                    </div>
+                                  </div>
+                                </div>
+                             </div>
+                           )
+                         })}
+                      </div>
+                    </div>
+
+                    {/* RIGHT PANEL */}
+                    <div className="lg:col-span-9 flex flex-col h-full gap-6 overflow-hidden">
+                      
+                      {/* Visualization Canvas */}
+                      <div className="relative flex-1 bg-[#0f1115] border border-gray-800 rounded-xl overflow-hidden shadow-2xl flex flex-col">
+                        <div className="absolute inset-0" style={{ 
+                             backgroundImage: 'linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)', 
+                             backgroundSize: '40px 40px' 
+                           }}>
+                        </div>
+
+                        {/* Diagram Container */}
+                        <div className="flex-1 flex items-center justify-center relative overflow-x-auto custom-scrollbar">
+                           <div className="min-w-[800px] h-[400px] relative">
+                              
+                              <svg className="absolute inset-0 w-full h-full overflow-visible pointer-events-none z-0">
+                                 <ConnectionLines active={currentStep >= 1} startCount={1} endCount={6} startX={100} endX={250} startYStart={200} endYStart={100} gapStart={0} gapEnd={35} color="#a855f7" />
+                                 <ConnectionLines active={currentStep >= 2} startCount={6} endCount={3} startX={250} endX={450} startYStart={100} endYStart={150} gapStart={35} gapEnd={50} color="#eab308" />
+                                 <ConnectionLines active={currentStep >= 3} startCount={3} endCount={8} startX={450} endX={650} startYStart={150} endYStart={80} gapStart={50} gapEnd={30} color="#22c55e" />
+                                 <ConnectionLines active={currentStep >= 4} startCount={8} endCount={5} startX={650} endX={850} startYStart={80} endYStart={120} gapStart={30} gapEnd={40} color="#ef4444" />
+                              </svg>
+
+                              <div className="absolute inset-0 pointer-events-none">
+                                 {/* Token Node */}
+                                 <div className="absolute left-[60px] top-[180px] w-20 h-10 flex items-center justify-center">
+                                    {inputValue && (
+                                       <div className={`transition-all duration-500 ${currentStep >= 0 ? 'scale-100 opacity-100' : 'scale-0 opacity-0'}`}>
+                                          <div className="bg-blue-900/80 border border-blue-500 text-blue-100 px-3 py-1 rounded text-xs font-mono shadow-[0_0_10px_rgba(59,130,246,0.5)]">
+                                             ID: {VOCAB[inputValue.toLowerCase()]?.id || 0}
+                                          </div>
+                                       </div>
+                                    )}
+                                 </div>
+                                 <div className="absolute left-[80px] top-[230px] text-[10px] text-gray-500 font-mono tracking-widest rotate-90 origin-left">INPUT</div>
+
+                                 {/* Embedding */}
+                                 <div className="absolute left-[250px] top-[100px]">
+                                    <EmbeddingBlock active={currentStep === 1} color="#a855f7" />
+                                    <div className="absolute -top-8 left-0 text-[10px] text-purple-400 font-bold uppercase tracking-wider">Embedding</div>
+                                 </div>
+
+                                 {/* Attention */}
+                                 <div className="absolute left-[450px] top-[150px]">
+                                    <AttentionHeads active={currentStep === 2} />
+                                    <div className="absolute -top-8 left-0 text-[10px] text-yellow-500 font-bold uppercase tracking-wider">Attention</div>
+                                 </div>
+
+                                 {/* Feed Fwd */}
+                                 <div className="absolute left-[650px] top-[80px]">
+                                    <div className="flex flex-col gap-2">
+                                       {[...Array(8)].map((_, i) => (
+                                          <div key={i} className={`w-3 h-3 rounded-full border border-green-800 transition-all duration-300 ${currentStep === 3 && (i % 2 === 0) ? 'bg-green-500 shadow-[0_0_10px_#22c55e]' : 'bg-gray-900'}`}></div>
+                                       ))}
+                                    </div>
+                                    <div className="absolute -top-8 left-0 text-[10px] text-green-500 font-bold uppercase tracking-wider">Feed Fwd</div>
+                                 </div>
+
+                                 {/* Logits */}
+                                 <div className="absolute left-[850px] top-[120px]">
+                                    <div className="flex flex-col gap-3 items-start">
+                                       {[...Array(5)].map((_, i) => (
+                                          <div key={i} className="flex items-center gap-2">
+                                             <div className={`h-2 rounded-full transition-all duration-700 ${currentStep === 4 ? 'bg-red-500 w-12 shadow-[0_0_10px_#ef4444]' : 'bg-gray-800 w-4'}`}></div>
+                                          </div>
+                                       ))}
+                                    </div>
+                                     <div className="absolute -top-8 left-0 text-[10px] text-red-500 font-bold uppercase tracking-wider">Logits</div>
+                                 </div>
+                              </div>
+                           </div>
+                        </div>
+
+                        {/* Predictions Overlay */}
+                        {outputData && (
+                           <div className="absolute bottom-6 right-6 bg-gray-900/90 backdrop-blur border border-gray-700 rounded-xl p-4 w-64 shadow-2xl animate-pulse-fast">
+                              <h4 className="text-xs text-gray-400 uppercase mb-2 flex justify-between">
+                                 <span>Probability Dist.</span>
+                                 <Activity className="w-3 h-3 text-green-500" />
+                              </h4>
+                              <div className="space-y-2">
+                                 {outputData.predictions.map((p, i) => (
+                                    <div key={i} className="flex items-center justify-between text-sm">
+                                       <span className="font-mono text-white">"{p.word}"</span>
+                                       <div className="flex items-center gap-2">
+                                          <div className="w-16 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                                             <div className="h-full bg-green-500" style={{ width: `${p.score}%` }}></div>
+                                          </div>
+                                          <span className="text-[10px] text-gray-400 w-6 text-right">{p.score}%</span>
+                                       </div>
+                                    </div>
+                                 ))}
+                              </div>
+                           </div>
+                        )}
+                      </div>
+
+                      {/* Logs & Context */}
+                      <div className="h-48 bg-[#0f1115] border border-gray-800 rounded-xl p-4 flex gap-4 shrink-0">
+                         <div className="flex-1 flex flex-col font-mono text-xs">
+                            <div className="flex items-center gap-2 text-gray-400 border-b border-gray-800 pb-2 mb-2">
+                               <span className="text-indigo-400">debug_console.log</span>
+                            </div>
+                            <div className="flex-1 overflow-y-auto space-y-1 custom-scrollbar pr-2">
+                               {!logs.length && <span className="text-gray-600 italic">Waiting for input stream...</span>}
+                               {logs.map((log, i) => (
+                                  <div key={i} className="text-gray-300 border-l-2 border-indigo-500/30 pl-2 py-0.5">
+                                     <span className="text-indigo-400 mr-2">[{i}]</span>
+                                     {log}
+                                  </div>
+                               ))}
+                               <div ref={logsEndRef} />
+                            </div>
+                         </div>
+                      </div>
+
+                    </div>
+
+                  </main>
+
+                  {/* Info Modal */}
+                  {showInfo && (
+                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                      <div className="bg-[#0f1115] border border-gray-700 max-w-2xl w-full rounded-2xl p-8 shadow-2xl relative overflow-hidden">
+                        <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-600/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
+                        <h2 className="text-2xl font-bold mb-6 text-white relative z-10">Understanding the Architecture</h2>
+                        <div className="space-y-6 text-sm text-gray-300 leading-relaxed relative z-10">
+                           <p><strong>Embeddings:</strong> Words are converted into fixed-size vectors representing meaning.</p>
+                           <p><strong>Attention:</strong> The model focuses on relevant past words using Query/Key/Value matrices.</p>
+                           <p><strong>Feed Forward:</strong> The neural network "thinks" and processes the gathered context.</p>
+                        </div>
+                        <button 
+                          onClick={() => setShowInfo(false)}
+                          className="mt-8 w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-lg text-white font-bold transition-all"
+                        >
+                          Return to Simulation
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
