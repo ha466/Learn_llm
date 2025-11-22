@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced RNN Lab: Inside the Black Box</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #09090b; color: #e4e4e7; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #18181b; }
+        ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+        .glass-panel {
+            background: rgba(24, 24, 27, 0.6);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        .matrix-grid {
+            display: grid;
+            gap: 2px;
+        }
+
+        @keyframes pulse-border {
+            0% { border-color: rgba(139, 92, 246, 0.5); }
+            50% { border-color: rgba(139, 92, 246, 1); }
+            100% { border-color: rgba(139, 92, 246, 0.5); }
+        }
+        .active-step { animation: pulse-border 2s infinite; }
+    </style>
+</head>
+<body>
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // --- Helper: Math Utils ---
+        const tanh = (x) => (Math.exp(2*x) - 1) / (Math.exp(2*x) + 1);
+        
+        // Dot product of Vector and Matrix column (Simplified for visualization as vector-matrix mult)
+        // In reality: W * x. Here we simulate it.
+        const matMulVector = (matrix, vector) => {
+            // matrix is array of rows. vector is array.
+            // Result size = rows in matrix
+            return matrix.map(row => {
+                return row.reduce((sum, val, i) => sum + val * vector[i], 0);
+            });
+        };
+
+        const vecAdd = (v1, v2) => v1.map((val, i) => val + v2[i]);
+        const vecAddScalar = (v1, s) => v1.map(val => val + s);
+
+        // --- Data: "Trained" Weights & Vocab ---
+        // 3 Hidden Neurons: 
+        // Index 0: "Positivity" Tracker
+        // Index 1: "Negativity" Tracker
+        // Index 2: "Inversion/Logic" Flag (tracks if 'not' was seen)
+
+        const HIDDEN_DIM = 3;
+        const INPUT_DIM = 3;
+
+        // Weights Input -> Hidden
+        // Rows = Hidden Units, Cols = Input Dimensions
+        const W_xh = [
+            [1.0, 0.0, 0.0],  // Input dim 0 feeds strongly to Hidden 0
+            [0.0, 1.0, 0.0],  // Input dim 1 feeds strongly to Hidden 1
+            [0.0, 0.0, 1.5]   // Input dim 2 feeds strongly to Hidden 2
+        ];
+
+        // Weights Hidden -> Hidden (Recurrent)
+        // Diagonal dominant to keep memory. 
+        // Special interaction: If H[2] (Inverter) is active, it flips H[0] and H[1]
+        const W_hh = [
+            [0.8, -0.5, 0.0], // H0 keeps value, but H1 (neg) suppresses it
+            [-0.5, 0.8, 0.0], // H1 keeps value, but H0 (pos) suppresses it
+            [0.0, 0.0, 0.2]   // H2 (inverter) decays quickly (short term memory)
+        ];
+
+        // Bias
+        const BIAS = [0, 0, -0.1];
+
+        const VOCAB = {
+            "good":  [1.0, 0.0, 0.0], // Pure positive
+            "bad":   [0.0, 1.0, 0.0], // Pure negative
+            "happy": [0.8, 0.0, 0.0],
+            "sad":   [0.0, 0.9, 0.0],
+            "not":   [0.0, 0.0, 1.0], // Trigger for inverter dimension
+            "very":  [0.5, 0.5, 0.0], // Amplifies both slightly
+            "meh":   [0.1, 0.1, 0.0],
+            "i":     [0.0, 0.0, 0.0], // Noise
+            "am":    [0.0, 0.0, 0.0],
+            "feeling": [0.1, 0.0, 0.0]
+        };
+
+        // --- Components ---
+
+        const HeatmapCell = ({ value, size = "w-8 h-8", showValue = true }) => {
+            // Color scale: Red (-1) to Gray (0) to Green (1)
+            const intensity = Math.min(Math.abs(value), 1);
+            let bg;
+            if (value > 0.05) bg = `rgba(16, 185, 129, ${intensity})`; // Green
+            else if (value < -0.05) bg = `rgba(239, 68, 68, ${intensity})`; // Red
+            else bg = 'rgba(39, 39, 42, 1)'; // Gray-800
+
+            return (
+                <div 
+                    className={`${size} flex items-center justify-center text-[9px] font-mono text-white border border-white/10 transition-colors duration-300`}
+                    style={{ backgroundColor: bg }}
+                    title={value.toFixed(3)}
+                >
+                    {showValue && Math.abs(value) > 0.1 ? value.toFixed(1) : ''}
+                </div>
+            );
+        };
+
+        const MatrixView = ({ data, title, rows, cols }) => (
+            <div className="flex flex-col items-center">
+                <span className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">{title}</span>
+                <div className="matrix-grid bg-gray-900 p-1 border border-gray-700 rounded" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+                    {data.flat().map((v, i) => <HeatmapCell key={i} value={v} />)}
+                </div>
+                <div className="mt-1 text-[9px] text-gray-600 font-mono">Shape: {rows}x{cols}</div>
+            </div>
+        );
+
+        const VectorCol = ({ data, label, highlight }) => (
+            <div className={`flex flex-col items-center transition-all duration-300 ${highlight ? 'scale-105' : ''}`}>
+                {label && <span className="text-[10px] text-gray-500 mb-1">{label}</span>}
+                <div className={`flex flex-col gap-1 p-1 rounded ${highlight ? 'bg-blue-900/20 border border-blue-500/30' : 'bg-transparent'}`}>
+                    {data.map((v, i) => <HeatmapCell key={i} value={v} size="w-10 h-8" />)}
+                </div>
+            </div>
+        );
+
+        // --- Main App ---
+
+        function App() {
+            const [sentence, setSentence] = useState("i am not happy");
+            const [history, setHistory] = useState([]);
+            const [currentStep, setCurrentStep] = useState(-1);
+            const [isPlaying, setIsPlaying] = useState(false);
+            
+            // Current Computation State
+            const [compState, setCompState] = useState(null); // Holds intermediate vectors for viz
+            
+            // Reset Logic
+            const reset = () => {
+                setHistory([]);
+                setCurrentStep(-1);
+                setCompState(null);
+                setIsPlaying(false);
+            };
+
+            // Step Logic
+            const stepForward = () => {
+                const words = sentence.toLowerCase().split(" ").filter(x=>x);
+                const nextStep = currentStep + 1;
+                
+                if (nextStep >= words.length) {
+                    setIsPlaying(false);
+                    return;
+                }
+
+                setCurrentStep(nextStep);
+
+                // 1. Get Previous Hidden State (or zeros)
+                const h_prev = nextStep === 0 ? [0,0,0] : history[nextStep-1].hidden;
+                
+                // 2. Get Input Vector
+                const word = words[nextStep];
+                const x_t = VOCAB[word] || [0,0,0]; // Default to zeros if unknown
+
+                // 3. Compute Terms
+                // Term 1: W_hh * h_prev
+                const term_memory = matMulVector(W_hh, h_prev);
+                
+                // Term 2: W_xh * x_t
+                const term_input = matMulVector(W_xh, x_t);
+
+                // 4. Sum Terms + Bias
+                const sum_pre_activ = vecAdd(vecAdd(term_memory, term_input), BIAS);
+
+                // 5. Activation (tanh)
+                const h_new = sum_pre_activ.map(tanh);
+
+                // Store Calculation Snapshot
+                const snapshot = {
+                    step: nextStep,
+                    word,
+                    h_prev,
+                    x_t,
+                    term_memory,
+                    term_input,
+                    sum_pre_activ,
+                    h_new
+                };
+
+                setCompState(snapshot);
+                setHistory(prev => [...prev, { hidden: h_new, word }]);
+            };
+
+            useEffect(() => {
+                let interval;
+                if (isPlaying) interval = setInterval(stepForward, 1200);
+                return () => clearInterval(interval);
+            }, [isPlaying, currentStep]);
+
+            // SVG Chart Logic
+            const getPath = (dimIndex) => {
+                if (history.length === 0) return "";
+                const points = history.map((snap, i) => {
+                    const x = (i / Math.max(5, history.length - 1)) * 300; // Scale to SVG width
+                    const y = 50 - (snap.hidden[dimIndex] * 40); // Scale -1..1 to 90..10 height
+                    return `${x},${y}`;
+                });
+                return `M 0,50 L ${points.join(" L ")}`;
+            };
+
+            return (
+                <div className="min-h-screen bg-[#050507] text-gray-200 flex flex-col overflow-hidden font-sans selection:bg-purple-500/30">
+                    
+                    {/* Navbar */}
+                    <nav className="h-14 border-b border-gray-800 bg-gray-900/50 backdrop-blur flex items-center justify-between px-6 z-20">
+                        <div className="flex items-center gap-2">
+                            <div className="bg-purple-600/20 p-1.5 rounded text-purple-400 border border-purple-500/30">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/></svg>
+                            </div>
+                            <span className="font-bold text-sm tracking-tight">RNN<span className="text-gray-500 font-mono text-xs ml-1">Lab_v1.0</span></span>
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <span className="text-[10px] text-gray-500 uppercase font-mono hidden sm:block">Architecture: Vanilla RNN (3-3-3)</span>
+                            <a href="#" onClick={() => reset()} className="text-xs text-gray-400 hover:text-white">Reset</a>
+                        </div>
+                    </nav>
+
+                    <main className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+                        
+                        {/* LEFT COLUMN: Controls & Matrices */}
+                        <div className="w-full lg:w-80 bg-[#0a0a0c] border-r border-gray-800 p-4 overflow-y-auto flex flex-col gap-6 z-10">
+                            
+                            {/* Input Section */}
+                            <div className="glass-panel p-4 rounded-xl">
+                                <label className="text-[10px] font-bold text-gray-500 uppercase mb-2 block">Input Sequence</label>
+                                <div className="flex gap-2 mb-3">
+                                    <input 
+                                        value={sentence}
+                                        onChange={(e) => { setSentence(e.target.value); reset(); }}
+                                        className="w-full bg-black/40 border border-gray-700 rounded px-2 py-1.5 text-xs text-white font-mono focus:border-purple-500 outline-none" 
+                                    />
+                                </div>
+                                <div className="grid grid-cols-3 gap-2">
+                                    <button onClick={() => setIsPlaying(!isPlaying)} className={`col-span-2 py-1.5 rounded text-xs font-bold border transition-all ${isPlaying ? 'bg-red-900/20 border-red-800 text-red-400' : 'bg-purple-600 text-white border-purple-500 hover:bg-purple-500'}`}>
+                                        {isPlaying ? "Pause" : "Run Sequence"}
+                                    </button>
+                                    <button onClick={stepForward} className="py-1.5 rounded text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700">
+                                        Step
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Weights Visualization */}
+                            <div className="glass-panel p-4 rounded-xl flex flex-col gap-6">
+                                <div className="flex items-center justify-between">
+                                    <h3 className="text-xs font-bold text-gray-300 flex items-center gap-2">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+                                        Network Weights
+                                    </h3>
+                                    <span className="text-[9px] text-gray-600 bg-gray-900 px-1 rounded">READ-ONLY</span>
+                                </div>
+                                
+                                <div className="flex justify-around">
+                                    <MatrixView data={W_xh} title="W_xh (In→Hid)" rows={3} cols={3} />
+                                    <MatrixView data={W_hh} title="W_hh (Hid→Hid)" rows={3} cols={3} />
+                                </div>
+
+                                <div className="text-[10px] text-gray-500 leading-relaxed">
+                                    <strong>W_hh Logic:</strong> <br/>
+                                    Row 0 & 1 interact negatively (pos/neg suppression). Row 2 (inverter) decays fast.
+                                </div>
+                            </div>
+
+                             {/* Vocabulary Reference */}
+                             <div className="glass-panel p-4 rounded-xl flex-1">
+                                <h3 className="text-xs font-bold text-gray-300 mb-3">Known Vocab</h3>
+                                <div className="flex flex-wrap gap-1.5">
+                                    {Object.keys(VOCAB).map(w => (
+                                        <span key={w} className="px-1.5 py-0.5 bg-gray-800 rounded text-[9px] text-gray-400 font-mono cursor-help border border-gray-700" title={`Vec: [${VOCAB[w].join(', ')}]`}>
+                                            {w}
+                                        </span>
+                                    ))}
+                                </div>
+                            </div>
+
+                        </div>
+
+                        {/* CENTER: Computation Graph */}
+                        <div className="flex-1 flex flex-col relative bg-grid-pattern overflow-hidden">
+                            
+                            <div className="absolute inset-0 pointer-events-none" style={{ backgroundImage: 'radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px)', backgroundSize: '24px 24px' }}></div>
+
+                            {/* Top: Time Series Monitor */}
+                            <div className="h-40 border-b border-gray-800 bg-black/20 p-4 flex gap-4 relative">
+                                <div className="absolute top-2 right-2 text-[9px] text-gray-600 font-mono">REAL-TIME ACTIVATION MONITOR</div>
+                                
+                                {/* Graph Container */}
+                                <div className="flex-1 relative border border-gray-800 bg-gray-900/50 rounded-lg overflow-hidden">
+                                    <svg className="w-full h-full" viewBox="0 0 300 100" preserveAspectRatio="none">
+                                        {/* Zero Line */}
+                                        <line x1="0" y1="50" x2="300" y2="50" stroke="#374151" strokeDasharray="2 2" strokeWidth="1" />
+                                        
+                                        {/* Paths */}
+                                        <path d={getPath(0)} fill="none" stroke="#10b981" strokeWidth="2" vectorEffect="non-scaling-stroke" className="opacity-80" />
+                                        <path d={getPath(1)} fill="none" stroke="#ef4444" strokeWidth="2" vectorEffect="non-scaling-stroke" className="opacity-80" />
+                                        <path d={getPath(2)} fill="none" stroke="#3b82f6" strokeWidth="2" vectorEffect="non-scaling-stroke" strokeDasharray="4 2" className="opacity-60" />
+                                    </svg>
+
+                                    {/* Legend */}
+                                    <div className="absolute bottom-1 left-2 flex gap-3 text-[9px] font-mono">
+                                        <span className="text-green-500 flex items-center gap-1"><div className="w-2 h-0.5 bg-green-500"></div> Pos (H0)</span>
+                                        <span className="text-red-500 flex items-center gap-1"><div className="w-2 h-0.5 bg-red-500"></div> Neg (H1)</span>
+                                        <span className="text-blue-500 flex items-center gap-1"><div className="w-2 h-0.5 bg-blue-500"></div> Logic (H2)</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Main: Equation Visualization */}
+                            <div className="flex-1 flex items-center justify-center p-8 overflow-x-auto">
+                                {compState ? (
+                                    <div className="flex items-center gap-4 animate-in zoom-in duration-300">
+                                        
+                                        {/* PART 1: INPUTS */}
+                                        <div className="flex flex-col gap-6 p-4 rounded-xl border border-gray-700/50 bg-gray-900/30">
+                                            <div className="flex items-center gap-4">
+                                                <div className="text-right">
+                                                    <div className="text-[10px] text-gray-400 mb-1">h<sub>t-1</sub></div>
+                                                    <VectorCol data={compState.h_prev} />
+                                                </div>
+                                                <div className="text-xl text-gray-600">×</div>
+                                                <MatrixView data={W_hh} title="W_hh" rows={3} cols={3} />
+                                                <div className="text-xl text-gray-400">=</div>
+                                                <VectorCol data={compState.term_memory} label="Mem Term" highlight={true} />
+                                            </div>
+
+                                            <div className="w-full h-px bg-gray-800"></div>
+
+                                            <div className="flex items-center gap-4">
+                                                <div className="text-right">
+                                                    <div className="text-[10px] text-gray-400 mb-1">x<sub>t</sub> ("{compState.word}")</div>
+                                                    <VectorCol data={compState.x_t} />
+                                                </div>
+                                                <div className="text-xl text-gray-600">×</div>
+                                                <MatrixView data={W_xh} title="W_xh" rows={3} cols={3} />
+                                                <div className="text-xl text-gray-400">=</div>
+                                                <VectorCol data={compState.term_input} label="In Term" highlight={true} />
+                                            </div>
+                                        </div>
+
+                                        {/* PART 2: SUMMATION */}
+                                        <div className="flex flex-col items-center justify-center gap-2 text-gray-500">
+                                            <div className="text-2xl font-light">+</div>
+                                            <div className="text-[10px] font-mono">Bias</div>
+                                            <div className="text-2xl font-light outline-dashed outline-1 outline-gray-700 rounded-full w-8 h-8 flex items-center justify-center">=</div>
+                                        </div>
+
+                                        {/* PART 3: RESULT */}
+                                        <div className="p-6 rounded-xl border border-purple-500/30 bg-purple-900/10 flex flex-col items-center relative">
+                                            <div className="absolute -top-3 bg-purple-900 text-purple-100 text-[10px] px-2 py-0.5 rounded">New State (h<sub>t</sub>)</div>
+                                            
+                                            <div className="flex items-center gap-4">
+                                                <div className="opacity-50 grayscale">
+                                                    <VectorCol data={compState.sum_pre_activ} label="Pre-Tanh" />
+                                                </div>
+                                                <div className="text-xl text-purple-400">&rarr; tanh &rarr;</div>
+                                                <div className="scale-110">
+                                                    <VectorCol data={compState.h_new} label="Active" highlight={true} />
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                    </div>
+                                ) : (
+                                    <div className="text-center text-gray-600">
+                                        <div className="mb-2 opacity-50">
+                                            <svg className="mx-auto w-12 h-12" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                                        </div>
+                                        <p className="text-sm">Lab is Ready.</p>
+                                        <p className="text-xs mt-1">Load a sequence to inspect computations.</p>
+                                    </div>
+                                )}
+                            </div>
+
+                        </div>
+
+                    </main>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
