@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive CNN Visualizer</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1f2937; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        
+        /* Grid Cell Animations */
+        @keyframes pop-in {
+            0% { transform: scale(0); opacity: 0; }
+            80% { transform: scale(1.1); opacity: 1; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .animate-pop { animation: pop-in 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+        
+        .scan-box {
+            transition: all 0.3s ease-out;
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.6);
+        }
+    </style>
+</head>
+<body class="bg-[#0a0a0f] text-gray-100 overflow-hidden">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // --- Icons ---
+        const Icon = ({ d, className }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+                <path d={d} />
+            </svg>
+        );
+        
+        const Icons = {
+            Eye: (props) => <Icon d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z" {...props} />,
+            Grid: (props) => <Icon d="M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18" {...props} />,
+            Filter: (props) => <Icon d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z" {...props} />,
+            Layers: (props) => <Icon d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" {...props} />,
+            ArrowRight: (props) => <Icon d="M5 12h14M12 5l7 7-7 7" {...props} />,
+            Play: (props) => <svg {...props} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>,
+            Zap: (props) => <Icon d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" {...props} />,
+            Box: (props) => <Icon d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" {...props} />,
+            Refresh: (props) => <Icon d="M23 4v6h-6M1 20v-6h6" {...props} /> // Simplified refresh
+        };
+
+        // --- Data & Constants ---
+        
+        // 6x6 Inputs
+        const PATTERNS = {
+            "X Shape": [
+                [1,0,0,0,0,1],
+                [0,1,0,0,1,0],
+                [0,0,1,1,0,0],
+                [0,0,1,1,0,0],
+                [0,1,0,0,1,0],
+                [1,0,0,0,0,1]
+            ],
+            "T Shape": [
+                [1,1,1,1,1,1],
+                [0,0,1,1,0,0],
+                [0,0,1,1,0,0],
+                [0,0,1,1,0,0],
+                [0,0,1,1,0,0],
+                [0,0,1,1,0,0]
+            ],
+            "Box": [
+                [0,0,0,0,0,0],
+                [0,1,1,1,1,0],
+                [0,1,0,0,1,0],
+                [0,1,0,0,1,0],
+                [0,1,1,1,1,0],
+                [0,0,0,0,0,0]
+            ]
+        };
+
+        // Simple vertical edge detector
+        const KERNEL = [
+            [1, 0, -1],
+            [1, 0, -1],
+            [1, 0, -1]
+        ];
+
+        const STEPS = [
+            { id: 'input', title: 'Input Image', desc: 'Raw pixel data (6x6 grid). 1=White, 0=Black.' },
+            { id: 'conv', title: 'Convolution', desc: 'A "Filter" (3x3) slides over the image to detect features (edges, curves). Math: Dot Product.' },
+            { id: 'relu', title: 'ReLU Activation', desc: 'Rectified Linear Unit. Replaces negative values with 0 to remove linearity.' },
+            { id: 'pool', title: 'Max Pooling', desc: 'Downsamples the image. Takes the maximum value from each 2x2 block. Reduces size.' },
+            { id: 'flatten', title: 'Flattening', desc: 'Converts the 2D matrix into a 1D list of numbers for the classifier.' },
+            { id: 'dense', title: 'Fully Connected', desc: 'The final neural network layers that vote on the class based on features.' }
+        ];
+
+        // --- Helper Components ---
+
+        const GridDisplay = ({ data, highlightRegion, label, active, showValues, colorScale = 'blue' }) => {
+            if (!data) return null;
+            const rows = data.length;
+            const cols = data[0].length;
+            
+            // Helpers for styling
+            const getBg = (val) => {
+                if (val === null || val === undefined) return 'bg-gray-900';
+                const intensity = Math.min(Math.abs(val) * 0.8, 1); // Scale for visualization
+                if (colorScale === 'blue') return `rgba(59, 130, 246, ${intensity + 0.1})`; // Input style
+                if (colorScale === 'purple') return `rgba(168, 85, 247, ${intensity + 0.1})`; // Feature map style
+                if (colorScale === 'green') return `rgba(34, 197, 94, ${intensity + 0.1})`; // Pool style
+                return 'bg-gray-800';
+            };
+
+            return (
+                <div className={`relative p-4 bg-gray-800/50 border border-gray-700 rounded-xl flex flex-col items-center transition-all duration-500 ${active ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/20' : 'opacity-70'}`}>
+                    <h3 className="text-xs font-bold text-gray-400 uppercase mb-3 tracking-wider">{label}</h3>
+                    <div 
+                        className="grid gap-1 relative" 
+                        style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
+                    >
+                        {data.map((row, r) => (
+                            row.map((val, c) => {
+                                const isHighlighted = highlightRegion && 
+                                    r >= highlightRegion.r && r < highlightRegion.r + highlightRegion.h &&
+                                    c >= highlightRegion.c && c < highlightRegion.c + highlightRegion.w;
+                                
+                                return (
+                                    <div 
+                                        key={`${r}-${c}`}
+                                        className={`w-8 h-8 flex items-center justify-center text-[10px] font-mono border border-white/5 rounded-sm transition-colors duration-200 
+                                            ${getBg(val)} 
+                                            ${isHighlighted ? 'ring-2 ring-yellow-400 z-10 scale-105' : ''}
+                                        `}
+                                    >
+                                        {showValues && val !== null && (Math.round(val * 10) / 10)}
+                                    </div>
+                                );
+                            })
+                        ))}
+                        
+                        {/* Flying highlight box for animation clarity */}
+                        {highlightRegion && (
+                            <div 
+                                className="absolute border-2 border-yellow-400 shadow-[0_0_15px_rgba(250,204,21,0.5)] pointer-events-none transition-all duration-300 ease-linear"
+                                style={{
+                                    top: `${highlightRegion.r * 36}px`, // 32px height + 4px gap approx
+                                    left: `${highlightRegion.c * 36}px`,
+                                    width: `${highlightRegion.w * 36 - 4}px`,
+                                    height: `${highlightRegion.h * 36 - 4}px`,
+                                    borderRadius: '4px'
+                                }}
+                            />
+                        )}
+                    </div>
+                    <div className="mt-2 text-[10px] text-gray-500 font-mono">Shape: {rows}x{cols}</div>
+                </div>
+            );
+        };
+
+        const DenseLayer = ({ data, active }) => (
+            <div className={`relative p-4 bg-gray-800/50 border border-gray-700 rounded-xl flex flex-col items-center h-full justify-center transition-all ${active ? 'ring-2 ring-red-500' : 'opacity-60'}`}>
+                <h3 className="text-xs font-bold text-gray-400 uppercase mb-3">Flattened</h3>
+                <div className="flex flex-col gap-1 h-48 flex-wrap content-center w-16">
+                    {data.map((val, i) => (
+                        <div key={i} className={`w-full h-2 rounded-full transition-all ${val > 0 ? 'bg-red-500' : 'bg-gray-700'}`} style={{ opacity: Math.min(1, val/2 + 0.2) }}></div>
+                    ))}
+                </div>
+            </div>
+        );
+
+        const OutputClasses = ({ scores, active }) => (
+             <div className={`relative p-4 bg-gray-800/50 border border-gray-700 rounded-xl flex flex-col items-center w-full transition-all ${active ? 'ring-2 ring-green-500' : 'opacity-60'}`}>
+                <h3 className="text-xs font-bold text-gray-400 uppercase mb-3">Prediction</h3>
+                <div className="w-full space-y-2">
+                    {[
+                        { label: "X-Shape", score: scores[0] },
+                        { label: "T-Shape", score: scores[1] },
+                        { label: "Box", score: scores[2] }
+                    ].map((item, i) => (
+                        <div key={i} className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-mono text-gray-300">{item.label}</span>
+                            <div className="flex-1 h-2 bg-gray-700 rounded-full overflow-hidden">
+                                <div className="h-full bg-green-500 transition-all duration-500" style={{ width: `${item.score}%` }}></div>
+                            </div>
+                            <span className="text-[10px] text-gray-400">{item.score}%</span>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+
+
+        // --- Main Application ---
+
+        function App() {
+            const [selectedPattern, setSelectedPattern] = useState("X Shape");
+            const [isAnimating, setIsAnimating] = useState(false);
+            const [stepIndex, setStepIndex] = useState(0); // 0: Input, 1: Conv, 2: Relu, 3: Pool, 4: Flatten, 5: Output
+            
+            // Animation State
+            const [convPos, setConvPos] = useState({ r: 0, c: 0 });
+            const [featureMap, setFeatureMap] = useState(Array(4).fill().map(() => Array(4).fill(null)));
+            const [reluMap, setReluMap] = useState(Array(4).fill().map(() => Array(4).fill(null)));
+            const [poolMap, setPoolMap] = useState(Array(2).fill().map(() => Array(2).fill(null)));
+            const [flatVector, setFlatVector] = useState(Array(4).fill(0)); // Simplified visualization
+            const [finalScores, setFinalScores] = useState([0,0,0]);
+
+            const currentInput = PATTERNS[selectedPattern];
+
+            // Reset when pattern changes
+            useEffect(() => {
+                resetAnimation();
+            }, [selectedPattern]);
+
+            const resetAnimation = () => {
+                setIsAnimating(false);
+                setStepIndex(0);
+                setConvPos({ r: 0, c: 0 });
+                setFeatureMap(Array(4).fill().map(() => Array(4).fill(null))); // 4x4 output for 6x6 input with 3x3 kernel
+                setReluMap(Array(4).fill().map(() => Array(4).fill(null)));
+                setPoolMap(Array(2).fill().map(() => Array(2).fill(null)));
+                setFinalScores([0,0,0]);
+            };
+
+            const runSimulation = async () => {
+                if (isAnimating) return;
+                setIsAnimating(true);
+                resetAnimation();
+
+                // --- Step 1: Convolution ---
+                setStepIndex(1);
+                
+                // We need to iterate 4x4 positions (Input 6 - Kernel 3 + 1 = 4)
+                const tempMap = Array(4).fill().map(() => Array(4).fill(0));
+                
+                for (let r = 0; r < 4; r++) {
+                    for (let c = 0; c < 4; c++) {
+                        setConvPos({ r, c });
+                        
+                        // Calculate dot product
+                        let sum = 0;
+                        for (let kr = 0; kr < 3; kr++) {
+                            for (let kc = 0; kc < 3; kc++) {
+                                sum += currentInput[r + kr][c + kc] * KERNEL[kr][kc];
+                            }
+                        }
+                        
+                        tempMap[r][c] = sum;
+                        
+                        // Update UI incrementally
+                        setFeatureMap(prev => {
+                            const newMap = [...prev.map(row => [...row])];
+                            newMap[r][c] = sum;
+                            return newMap;
+                        });
+
+                        await new Promise(resolve => setTimeout(resolve, 150)); // Speed of scan
+                    }
+                }
+
+                // --- Step 2: ReLU ---
+                setStepIndex(2);
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                const tempRelu = tempMap.map(row => row.map(val => Math.max(0, val)));
+                setReluMap(tempRelu); // Show all at once for speed
+                
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                // --- Step 3: Max Pooling ---
+                setStepIndex(3);
+                const tempPool = Array(2).fill().map(() => Array(2).fill(0));
+                
+                // Pool 2x2 regions from 4x4 Relu Map
+                for (let r = 0; r < 2; r++) {
+                    for (let c = 0; c < 2; c++) {
+                        // Highlight region on ReLU map? (Optional, for now just showing result)
+                        // Max of the 2x2 block
+                        const rStart = r * 2;
+                        const cStart = c * 2;
+                        const maxVal = Math.max(
+                            tempRelu[rStart][cStart],
+                            tempRelu[rStart][cStart+1],
+                            tempRelu[rStart+1][cStart],
+                            tempRelu[rStart+1][cStart+1]
+                        );
+                        
+                        tempPool[r][c] = maxVal;
+                        setPoolMap(prev => {
+                            const newP = [...prev.map(row => [...row])];
+                            newP[r][c] = maxVal;
+                            return newP;
+                        });
+                        await new Promise(resolve => setTimeout(resolve, 300));
+                    }
+                }
+
+                // --- Step 4: Flatten ---
+                setStepIndex(4);
+                const flattened = tempPool.flat();
+                setFlatVector(flattened);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                // --- Step 5: Dense/Output ---
+                setStepIndex(5);
+                // Mock scores based on pattern
+                const mockScores = selectedPattern === "X Shape" ? [92, 12, 5] 
+                                 : selectedPattern === "T Shape" ? [15, 88, 10] 
+                                 : [5, 8, 95];
+                
+                setFinalScores(mockScores);
+                setIsAnimating(false);
+            };
+
+            // Computed highlight regions based on animation state
+            const inputHighlight = stepIndex === 1 ? { r: convPos.r, c: convPos.c, w: 3, h: 3 } : null;
+            const featureHighlight = stepIndex === 1 ? { r: convPos.r, c: convPos.c, w: 1, h: 1 } : null;
+
+            return (
+                <div className="min-h-screen flex flex-col font-sans">
+                    
+                    {/* Header */}
+                    <header className="bg-gray-900/80 backdrop-blur-md border-b border-gray-800 px-6 py-4 flex items-center justify-between sticky top-0 z-20">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-blue-600 p-2 rounded-lg shadow-lg shadow-blue-500/20">
+                                <Icons.Eye className="w-6 h-6 text-white" />
+                            </div>
+                            <div>
+                                <h1 className="text-xl font-bold text-white tracking-tight">CNN Internals Visualizer</h1>
+                                <p className="text-xs text-gray-400 font-mono">Convolutional Neural Network Explainer</p>
+                            </div>
+                        </div>
+                        <div className="flex gap-2">
+                             {Object.keys(PATTERNS).map(p => (
+                                 <button
+                                    key={p}
+                                    onClick={() => setSelectedPattern(p)}
+                                    disabled={isAnimating}
+                                    className={`px-3 py-1.5 text-xs font-bold rounded border transition-all ${selectedPattern === p ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'}`}
+                                 >
+                                     {p}
+                                 </button>
+                             ))}
+                        </div>
+                    </header>
+
+                    {/* Main Stage */}
+                    <main className="flex-1 max-w-7xl mx-auto w-full p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+                        
+                        {/* Left Panel: Control & Pipeline */}
+                        <div className="lg:col-span-3 flex flex-col gap-4">
+                            <div className="bg-gray-900 border border-gray-800 p-5 rounded-xl">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h2 className="text-sm font-bold text-gray-300 uppercase">Controls</h2>
+                                    <span className={`text-[10px] px-2 py-0.5 rounded-full border ${isAnimating ? 'text-green-400 border-green-900 bg-green-900/20' : 'text-gray-500 border-gray-800 bg-gray-800'}`}>
+                                        {isAnimating ? 'RUNNING' : 'IDLE'}
+                                    </span>
+                                </div>
+                                <button 
+                                    onClick={runSimulation}
+                                    disabled={isAnimating}
+                                    className={`w-full py-3 rounded-lg font-bold flex items-center justify-center gap-2 transition-all ${isAnimating ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-900/20'}`}
+                                >
+                                    <Icons.Play className="w-4 h-4 fill-current" />
+                                    Run Model
+                                </button>
+                            </div>
+
+                            <div className="flex-1 space-y-2 overflow-y-auto custom-scrollbar pr-2">
+                                {STEPS.map((step, idx) => {
+                                    const isActive = stepIndex === idx;
+                                    const isPast = stepIndex > idx;
+                                    return (
+                                        <div 
+                                            key={step.id}
+                                            className={`p-3 rounded-lg border text-sm transition-all duration-300 ${isActive ? 'bg-blue-900/20 border-blue-500/50 pl-4' : 'bg-gray-900/40 border-gray-800 text-gray-500'}`}
+                                        >
+                                            <div className="font-bold mb-1 flex items-center gap-2">
+                                                <span className={`text-[10px] w-5 h-5 flex items-center justify-center rounded-full border ${isActive ? 'border-blue-400 text-blue-400' : 'border-gray-700'}`}>{idx+1}</span>
+                                                {step.title}
+                                            </div>
+                                            {isActive && <p className="text-xs text-gray-300 leading-relaxed pl-7 animate-pop">{step.desc}</p>}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+
+                        {/* Center Stage: Visualization Canvas */}
+                        <div className="lg:col-span-9 bg-[#0f1115] border border-gray-800 rounded-xl relative overflow-hidden flex flex-col">
+                            <div className="absolute inset-0 opacity-20 pointer-events-none" style={{ backgroundImage: 'radial-gradient(#374151 1px, transparent 1px)', backgroundSize: '20px 20px' }}></div>
+                            
+                            {/* Connection Lines Layer (SVG) */}
+                            <svg className="absolute inset-0 w-full h-full pointer-events-none z-0">
+                                {/* Dynamic lines based on step could go here, kept simple for grid layout */}
+                                <defs>
+                                    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                                        <path d="M0,0 L0,6 L9,3 z" fill="#4b5563" />
+                                    </marker>
+                                </defs>
+                                {/* Simple arrows between sections */}
+                                <line x1="20%" y1="40%" x2="28%" y2="40%" stroke="#374151" strokeWidth="2" markerEnd="url(#arrow)" />
+                                <line x1="45%" y1="40%" x2="53%" y2="40%" stroke="#374151" strokeWidth="2" markerEnd="url(#arrow)" />
+                                <line x1="70%" y1="40%" x2="78%" y2="40%" stroke="#374151" strokeWidth="2" markerEnd="url(#arrow)" />
+                            </svg>
+
+                            <div className="relative z-10 flex-1 p-8 flex items-center justify-between gap-4 overflow-x-auto custom-scrollbar">
+                                
+                                {/* 1. INPUT */}
+                                <div className="flex flex-col items-center gap-4">
+                                    <GridDisplay 
+                                        data={currentInput} 
+                                        active={stepIndex >= 0} 
+                                        label="Input Image (6x6)" 
+                                        highlightRegion={inputHighlight}
+                                        colorScale="blue"
+                                    />
+                                    {/* Kernel Visualization */}
+                                    <div className={`mt-4 p-2 bg-gray-800 rounded border border-gray-600 transition-opacity duration-300 ${stepIndex === 1 ? 'opacity-100' : 'opacity-50'}`}>
+                                        <div className="text-[10px] text-center mb-1 text-gray-400">FILTER (Vertical Edge)</div>
+                                        <div className="grid grid-cols-3 gap-0.5">
+                                            {KERNEL.flat().map((k, i) => (
+                                                <div key={i} className="w-5 h-5 flex items-center justify-center text-[9px] bg-gray-700 text-white font-mono">
+                                                    {k}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Arrow */}
+                                <Icons.ArrowRight className={`w-6 h-6 transition-colors ${stepIndex >= 1 ? 'text-blue-500' : 'text-gray-700'}`} />
+
+                                {/* 2. FEATURE MAP & RELU */}
+                                <div className="flex flex-col items-center gap-6">
+                                    <GridDisplay 
+                                        data={featureMap} 
+                                        active={stepIndex >= 1} 
+                                        label="Feature Map (4x4)" 
+                                        highlightRegion={featureHighlight}
+                                        showValues={true}
+                                        colorScale="purple"
+                                    />
+                                    
+                                    {/* ReLU Transformation arrow/indicator */}
+                                    <div className={`flex flex-col items-center transition-opacity duration-500 ${stepIndex >= 2 ? 'opacity-100' : 'opacity-30'}`}>
+                                        <div className="text-[10px] text-yellow-500 mb-1 font-bold">ReLU Applied</div>
+                                        <Icons.Zap className="w-4 h-4 text-yellow-500 mb-2" />
+                                        <GridDisplay 
+                                            data={reluMap} 
+                                            active={stepIndex >= 2} 
+                                            label="ReLU Map" 
+                                            showValues={true}
+                                            colorScale="purple"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Arrow */}
+                                <Icons.ArrowRight className={`w-6 h-6 transition-colors ${stepIndex >= 3 ? 'text-blue-500' : 'text-gray-700'}`} />
+
+                                {/* 3. MAX POOLING */}
+                                <div className="flex flex-col items-center">
+                                    <GridDisplay 
+                                        data={poolMap} 
+                                        active={stepIndex >= 3} 
+                                        label="Pooled (2x2)" 
+                                        showValues={true}
+                                        colorScale="green"
+                                    />
+                                </div>
+
+                                {/* Arrow */}
+                                <Icons.ArrowRight className={`w-6 h-6 transition-colors ${stepIndex >= 4 ? 'text-blue-500' : 'text-gray-700'}`} />
+
+                                {/* 4. FLATTEN & DENSE */}
+                                <div className="flex flex-col items-center gap-4 h-full justify-center">
+                                    <DenseLayer data={flatVector} active={stepIndex >= 4} />
+                                </div>
+
+                                {/* Arrow */}
+                                <Icons.ArrowRight className={`w-6 h-6 transition-colors ${stepIndex >= 5 ? 'text-blue-500' : 'text-gray-700'}`} />
+
+                                {/* 5. OUTPUT */}
+                                <div className="w-48">
+                                    <OutputClasses scores={finalScores} active={stepIndex >= 5} />
+                                </div>
+
+                            </div>
+                        </div>
+                    </main>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
